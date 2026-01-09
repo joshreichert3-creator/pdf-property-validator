@@ -11,10 +11,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
     
@@ -34,7 +34,7 @@ jobs:
       shell: bash
     
     - name: Upload executable as artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: PDFPropertyValidator-Windows-${{ steps.version.outputs.date }}
         path: dist/PDFPropertyValidator.exe
@@ -42,7 +42,7 @@ jobs:
     
     - name: Create Release (optional)
       if: github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: v${{ steps.version.outputs.date }}
         name: PDF Property Validator ${{ steps.version.outputs.date }}
