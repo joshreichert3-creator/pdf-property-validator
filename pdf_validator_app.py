@@ -7,12 +7,13 @@ import webbrowser
 import threading
 import sys
 import socket
+import gc  # Garbage collection for memory management
 
 app = Flask(__name__)
 
 # Increase timeout for large PDFs
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size
 
 # -------------------------
 # Configurable parameters
@@ -22,8 +23,8 @@ CONFIG = {
     "management_fee_percent_max": 6.0,
     "management_fee_dollar_min": 95.0,
     "management_fee_dollar_max": 250.0,
-    "MAX_PAGES": 500,
-    "REQUEST_TIMEOUT": 300  # 5 minutes for processing
+    "MAX_PAGES": 10000,  # Increased from 500 to handle very large PDFs
+    "REQUEST_TIMEOUT": 3600  # 1 hour for processing
 }
 
 # HTML Template embedded in the application
@@ -318,9 +319,9 @@ HTML_TEMPLATE = """
       formData.append("file", file);
       
       try {
-        // Increase timeout for fetch to 10 minutes
+        // Increase timeout for fetch to 2 hours for very large files
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
+        const timeoutId = setTimeout(() => controller.abort(), 7200000); // 2 hours
         
         const response = await fetch("/check_pdf", { 
           method: "POST",
