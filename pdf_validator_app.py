@@ -19,7 +19,7 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 # -------------------------
 CONFIG = {
     "management_fee_percent_min": 3.0,
-    "management_fee_percent_max": 5.0,
+    "management_fee_percent_max": 6.0,
     "management_fee_dollar_min": 95.0,
     "management_fee_dollar_max": 250.0,
     "MAX_PAGES": 500,
