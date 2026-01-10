@@ -10,15 +10,20 @@ import socket
 
 app = Flask(__name__)
 
+# Increase timeout for large PDFs
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+
 # -------------------------
 # Configurable parameters
 # -------------------------
 CONFIG = {
     "management_fee_percent_min": 3.0,
-    "management_fee_percent_max": 5.0,
+    "management_fee_percent_max": 6.0,
     "management_fee_dollar_min": 95.0,
     "management_fee_dollar_max": 250.0,
-    "MAX_PAGES": 500
+    "MAX_PAGES": 500,
+    "REQUEST_TIMEOUT": 300  # 5 minutes for processing
 }
 
 # HTML Template embedded in the application
@@ -307,16 +312,23 @@ HTML_TEMPLATE = """
       }
       
       checkBtn.disabled = true;
-      btnText.innerHTML = '<span class="loader"></span>Processing PDF...';
+      btnText.innerHTML = '<span class="loader"></span>Processing PDF... This may take several minutes for large files';
       
       const formData = new FormData();
       formData.append("file", file);
       
       try {
+        // Increase timeout for fetch to 10 minutes
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
+        
         const response = await fetch("/check_pdf", { 
           method: "POST",
           body: formData,
+          signal: controller.signal
         });
+        
+        clearTimeout(timeoutId);
         
         const data = await response.json();
         
@@ -377,7 +389,11 @@ HTML_TEMPLATE = """
         resultsDiv.innerHTML = detailedHtml;
         
       } catch (error) {
-        showAlert(`Failed to process PDF: ${error.message}`, "error");
+        if (error.name === 'AbortError') {
+          showAlert('Processing timed out. The PDF may be too large or complex. Try splitting it into smaller files.', "error");
+        } else {
+          showAlert(`Failed to process PDF: ${error.message}`, "error");
+        }
       } finally {
         checkBtn.disabled = false;
         btnText.textContent = "Validate PDF";
@@ -796,14 +812,14 @@ def parse_pdf(file_stream):
                 property_results.append({
                     "check": "Management Fee (%) in Range",
                     "value": f"{management_fee_percent_extracted:.2f}%",
-                    "expected": f"{CONFIG['management_fee_percent_min']:.2f}% - {CONFIG['management_fee_percent_max']:.2f}%",
+                    "expected": f"{CONFIG['management_fee_percent_min']:.1f}% - {CONFIG['management_fee_percent_max']:.1f}% (whole or .5 increments)",
                     "status": final_management_fee_status
                 })
             else:
                 property_results.append({
                     "check": "Management Fee (%) in Range",
                     "value": "N/A (Not Found)",
-                    "expected": f"{CONFIG['management_fee_percent_min']:.2f}% - {CONFIG['management_fee_percent_max']:.2f}%",
+                    "expected": f"{CONFIG['management_fee_percent_min']:.1f}% - {CONFIG['management_fee_percent_max']:.1f}% (whole or .5 increments)",
                     "status": "INFO"
                 })
 
@@ -942,5 +958,13 @@ if __name__ == '__main__':
     """)
     
     # Run Flask with minimal output
-    app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
-                
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    
+    # Use threaded mode and increase timeout
+    from werkzeug.serving import run_simple
+    run_simple('127.0.0.1', port, app, 
+               use_reloader=False, 
+               use_debugger=False, 
+               threaded=True)
