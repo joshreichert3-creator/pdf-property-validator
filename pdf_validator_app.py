@@ -21,6 +21,7 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size
 CONFIG = {
     "management_fee_percent_min": 3.0,
     "management_fee_percent_max": 6.0,
+    "management_fee_percent_allowed": [3.0, 3.5, 3.75, 4.0, 4.5, 5.0, 5.5, 6.0],  # Only these specific values
     "management_fee_dollar_min": 95.0,
     "management_fee_dollar_max": 250.0,
     "MAX_PAGES": 10000,  # Increased from 500 to handle very large PDFs
@@ -824,17 +825,20 @@ def parse_pdf(file_stream):
                 })
 
             if management_fee_percent_extracted is not None:
+                # Format allowed values nicely
+                allowed_values_str = ", ".join([f"{v:.2f}%" if v != int(v) else f"{int(v)}%" for v in CONFIG["management_fee_percent_allowed"]])
                 property_results.append({
                     "check": "Management Fee (%) in Range",
                     "value": f"{management_fee_percent_extracted:.2f}%",
-                    "expected": f"{CONFIG['management_fee_percent_min']:.1f}% - {CONFIG['management_fee_percent_max']:.1f}% (whole or .5 increments)",
+                    "expected": f"One of: {allowed_values_str}",
                     "status": final_management_fee_status
                 })
             else:
+                allowed_values_str = ", ".join([f"{v:.2f}%" if v != int(v) else f"{int(v)}%" for v in CONFIG["management_fee_percent_allowed"]])
                 property_results.append({
                     "check": "Management Fee (%) in Range",
                     "value": "N/A (Not Found)",
-                    "expected": f"{CONFIG['management_fee_percent_min']:.1f}% - {CONFIG['management_fee_percent_max']:.1f}% (whole or .5 increments)",
+                    "expected": f"One of: {allowed_values_str}",
                     "status": "INFO"
                 })
 
