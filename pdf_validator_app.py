@@ -444,10 +444,18 @@ HTML_TEMPLATE = """
 def parse_pdf(file_stream):
     import sys  # Import sys for flushing
     
-    print("\n" + "="*70)
-    print("PARSE_PDF FUNCTION STARTED - DEBUG OUTPUT ENABLED")
-    print("="*70 + "\n")
-    sys.stdout.flush()
+    # Open a debug log file
+    debug_log = open("pdf_validator_debug.log", "w", encoding="utf-8")
+    
+    def debug_print(msg):
+        """Print to both console and file"""
+        print(msg, flush=True)
+        debug_log.write(msg + "\n")
+        debug_log.flush()
+    
+    debug_print("\n" + "="*70)
+    debug_print("PARSE_PDF FUNCTION STARTED - DEBUG OUTPUT ENABLED")
+    debug_print("="*70 + "\n")
     
     tmp_path = None
     doc = None
@@ -918,6 +926,12 @@ def parse_pdf(file_stream):
             doc.close()
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
+        
+        # Close debug log
+        try:
+            debug_log.close()
+        except:
+            pass
 
     return {"detailed_checks": final_property_checks, "failing_summary": failing_properties_summary}
 
