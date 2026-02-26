@@ -25,7 +25,7 @@ jobs:
     
     - name: Build executable
       run: |
-        pyinstaller --onefile --windowed --name "PDFPropertyValidator" pdf_validator_app.py
+        pyinstaller --onefile --name "PDFPropertyValidator" pdf_validator_app.py
     
     - name: Get version info
       id: version
