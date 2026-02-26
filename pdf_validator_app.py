@@ -935,14 +935,15 @@ def parse_pdf(file_stream):
             os.remove(tmp_path)
         
         # Close debug log and print location
-        try:
-            debug_log.close()
-            print(f"\n{'='*70}")
-            print(f"DEBUG LOG SAVED TO: {log_path}")
-            print(f"Open this file to see detailed extraction info")
-            print(f"{'='*70}\n")
-        except:
-            pass
+        if debug_log_file:
+            try:
+                debug_log_file.close()
+                print(f"\n{'='*70}")
+                print(f"DEBUG LOG SAVED TO: {log_path}")
+                print(f"Open this file to see detailed extraction info")
+                print(f"{'='*70}\n")
+            except:
+                pass
 
     return {"detailed_checks": final_property_checks, "failing_summary": failing_properties_summary}
 
