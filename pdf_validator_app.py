@@ -442,9 +442,12 @@ HTML_TEMPLATE = """
 # PDF Parsing Function (Your existing code)
 # -------------------------
 def parse_pdf(file_stream):
+    import sys  # Import sys for flushing
+    
     print("\n" + "="*70)
     print("PARSE_PDF FUNCTION STARTED - DEBUG OUTPUT ENABLED")
     print("="*70 + "\n")
+    sys.stdout.flush()
     
     tmp_path = None
     doc = None
