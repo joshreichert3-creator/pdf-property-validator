@@ -442,6 +442,10 @@ HTML_TEMPLATE = """
 # PDF Parsing Function (Your existing code)
 # -------------------------
 def parse_pdf(file_stream):
+    print("\n" + "="*70)
+    print("PARSE_PDF FUNCTION STARTED - DEBUG OUTPUT ENABLED")
+    print("="*70 + "\n")
+    
     tmp_path = None
     doc = None
     final_property_checks = []
@@ -931,7 +935,10 @@ def check_pdf():
     if file and file.filename.endswith('.pdf'):
         try:
             # Log file info
-            print(f"Processing file: {file.filename}")
+            print(f"\n{'#'*70}")
+            print(f"# STARTING PDF PROCESSING")
+            print(f"# File: {file.filename}")
+            print(f"{'#'*70}\n")
             
             results = parse_pdf(file.stream)
             
@@ -939,7 +946,10 @@ def check_pdf():
                 return jsonify({'error': 'No properties found or parsed in the PDF.'}), 400
             
             # Log success
-            print(f"Successfully processed {len(results.get('detailed_checks', []))} properties")
+            print(f"\n{'#'*70}")
+            print(f"# COMPLETED PDF PROCESSING")
+            print(f"# Successfully processed {len(results.get('detailed_checks', []))} properties")
+            print(f"{'#'*70}\n")
             
             return jsonify(results)
             
@@ -979,6 +989,10 @@ def open_browser(port):
     webbrowser.open(f'http://127.0.0.1:{port}')
 
 if __name__ == '__main__':
+    # Force stdout to flush immediately so all print statements show up
+    import sys
+    sys.stdout.reconfigure(line_buffering=True)
+    
     port = find_free_port()
     
     # Open browser in a separate thread
@@ -997,13 +1011,16 @@ if __name__ == '__main__':
 ║                                                          ║
 ║  Press Ctrl+C to stop the application                   ║
 ║                                                          ║
+║  DEBUG OUTPUT IS ENABLED - YOU WILL SEE DETAILED INFO   ║
+║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
     """)
+    sys.stdout.flush()
     
     # Run Flask with minimal output and increased timeout
     import logging
     log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
+    log.setLevel(logging.WARNING)  # Changed from ERROR to WARNING so we see some Flask messages
     
     # Use threaded mode and increase timeout
     from werkzeug.serving import WSGIRequestHandler
