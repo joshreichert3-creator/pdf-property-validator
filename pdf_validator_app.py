@@ -444,17 +444,24 @@ HTML_TEMPLATE = """
 def parse_pdf(file_stream):
     import sys  # Import sys for flushing
     
-    # Open a debug log file
-    debug_log = open("pdf_validator_debug.log", "w", encoding="utf-8")
+    # Open a debug log file in temp directory with timestamp to avoid conflicts
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(tempfile.gettempdir(), f"pdf_validator_debug_{timestamp}.log")
+    debug_log = open(log_path, "w", encoding="utf-8")
     
     def debug_print(msg):
         """Print to both console and file"""
         print(msg, flush=True)
-        debug_log.write(msg + "\n")
-        debug_log.flush()
+        try:
+            debug_log.write(msg + "\n")
+            debug_log.flush()
+        except:
+            pass
     
     debug_print("\n" + "="*70)
     debug_print("PARSE_PDF FUNCTION STARTED - DEBUG OUTPUT ENABLED")
+    debug_print(f"Debug log file: {log_path}")
     debug_print("="*70 + "\n")
     
     tmp_path = None
@@ -927,9 +934,13 @@ def parse_pdf(file_stream):
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
         
-        # Close debug log
+        # Close debug log and print location
         try:
             debug_log.close()
+            print(f"\n{'='*70}")
+            print(f"DEBUG LOG SAVED TO: {log_path}")
+            print(f"Open this file to see detailed extraction info")
+            print(f"{'='*70}\n")
         except:
             pass
 
