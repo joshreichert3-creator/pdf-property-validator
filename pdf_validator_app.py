@@ -582,7 +582,11 @@ def parse_pdf(file_stream):
                 if "Prepaid Rent Liability" in stripped_line and prepaid_rent_liability_value is None:
                     match = re.search(r"Prepaid Rent Liability.*?([-]?[\d,]+\.?\d{0,2})", stripped_line, re.IGNORECASE)
                     if match:
-                        try: prepaid_rent_liability_value = float(match.group(1).replace(",", ""))
+                        try: 
+                            value = float(match.group(1).replace(",", ""))
+                            # ONLY accept non-negative values (Balance Sheet)
+                            if value >= 0:
+                                prepaid_rent_liability_value = value
                         except ValueError: pass
                     
                     if prepaid_rent_liability_value is None and i + 1 < len(lines_for_extraction):
