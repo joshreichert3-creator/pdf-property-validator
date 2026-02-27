@@ -1011,9 +1011,12 @@ def open_browser(port):
     webbrowser.open(f'http://127.0.0.1:{port}')
 
 if __name__ == '__main__':
-    # Force unbuffered output
+    # Force stdout to flush immediately
     import sys
-    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0) if hasattr(sys.stdout, 'fileno') else sys.stdout
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except:
+        pass  # Ignore if reconfigure not available
     
     port = find_free_port()
     
