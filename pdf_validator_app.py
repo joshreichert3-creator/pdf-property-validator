@@ -934,19 +934,8 @@ def parse_pdf(file_stream):
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
         
-        # Close debug log and print location
-        try:
-            if 'log_file_path' in locals():
-                print(f"\n{'='*70}")
-                print(f"DEBUG LOG SAVED TO: {log_file_path}")
-                print(f"Open this file to see detailed extraction info")
-                print(f"{'='*70}\n")
-        except:
-            pass
+        print(f"\nProcessing complete!", flush=True)
 
-    # Clean up global
-    debug_log_file = None
-    
     return {"detailed_checks": final_property_checks, "failing_summary": failing_properties_summary}
 
 # -------------------------
