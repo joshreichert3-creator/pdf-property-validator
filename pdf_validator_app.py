@@ -929,6 +929,8 @@ def parse_pdf(file_stream):
                 })
 
     finally:
+        global debug_log_file
+        
         if doc:
             doc.close()
         if tmp_path and os.path.exists(tmp_path):
@@ -939,11 +941,12 @@ def parse_pdf(file_stream):
             try:
                 debug_log_file.close()
                 print(f"\n{'='*70}")
-                print(f"DEBUG LOG SAVED TO: {log_path}")
+                print(f"DEBUG LOG SAVED TO: {log_file_path}")
                 print(f"Open this file to see detailed extraction info")
                 print(f"{'='*70}\n")
             except:
                 pass
+            debug_log_file = None
 
     return {"detailed_checks": final_property_checks, "failing_summary": failing_properties_summary}
 
