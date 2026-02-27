@@ -470,6 +470,8 @@ def parse_pdf(file_stream):
     failing_properties_summary = []
 
     try:
+        print("ENTERING TRY BLOCK", flush=True)
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             file_stream.seek(0)
             tmp.write(file_stream.read())
@@ -1009,9 +1011,9 @@ def open_browser(port):
     webbrowser.open(f'http://127.0.0.1:{port}')
 
 if __name__ == '__main__':
-    # Force stdout to flush immediately so all print statements show up
+    # Force unbuffered output
     import sys
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0) if hasattr(sys.stdout, 'fileno') else sys.stdout
     
     port = find_free_port()
     
