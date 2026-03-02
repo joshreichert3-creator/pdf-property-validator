@@ -1,4 +1,3 @@
-
 import fitz  # PyMuPDF
 from flask import Flask, render_template_string, request, jsonify
 import tempfile
@@ -584,16 +583,22 @@ def parse_pdf(file_stream):
                     if match:
                         try: 
                             value = float(match.group(1).replace(",", ""))
-                            # ONLY accept non-negative values (Balance Sheet)
+                            # CRITICAL: Balance Sheet values are NEVER negative
+                            # Only accept non-negative values (>=0)
                             if value >= 0:
                                 prepaid_rent_liability_value = value
+                            # If negative, leave as None (will show as N/A)
                         except ValueError: pass
                     
                     if prepaid_rent_liability_value is None and i + 1 < len(lines_for_extraction):
                          next_line = lines_for_extraction[i+1].strip()
                          match = standalone_number_pattern.match(next_line)
                          if match:
-                             try: prepaid_rent_liability_value = float(match.group(1).replace(",", ""))
+                             try: 
+                                 value = float(match.group(1).replace(",", ""))
+                                 # CRITICAL: Only accept non-negative
+                                 if value >= 0:
+                                     prepaid_rent_liability_value = value
                              except ValueError: pass
                     break
 
