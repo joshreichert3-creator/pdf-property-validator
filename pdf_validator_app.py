@@ -1,3 +1,23 @@
+import sys
+import subprocess
+
+def ensure_packages():
+    required = {
+        "fitz": "pymupdf",
+        "flask": "flask",
+        "pandas": "pandas",
+        "openpyxl": "openpyxl",
+    }
+    for module, package in required.items():
+        try:
+            __import__(module)
+        except ImportError:
+            print(f"Installing missing package: {package}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            print(f"Successfully installed {package}.")
+
+ensure_packages()
+
 import fitz  # PyMuPDF
 from flask import Flask, render_template_string, request, jsonify
 import tempfile
@@ -5,7 +25,6 @@ import os
 import re
 import webbrowser
 import threading
-import sys
 import socket
 import gc
 
