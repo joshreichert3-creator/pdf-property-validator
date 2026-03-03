@@ -1,37 +1,5 @@
 import sys
-import subprocess
 import os
-
-def ensure_packages():
-    required = {
-        "fitz": "pymupdf",
-        "flask": "flask",
-        "pandas": "pandas",
-        "openpyxl": "openpyxl",
-    }
-    needed = []
-    for module, package in required.items():
-        try:
-            __import__(module)
-        except ImportError:
-            needed.append(package)
-
-    if needed:
-        print(f"Installing missing packages: {', '.join(needed)}...")
-        print(f"Using Python: {sys.executable}")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--user"] + needed,
-            capture_output=True, text=True
-        )
-        print(result.stdout)
-        if result.returncode != 0:
-            print("pip error:", result.stderr)
-            print("Try running manually: pip install pandas openpyxl")
-            sys.exit(1)
-        print("Installation complete. Restarting...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-
-ensure_packages()
 
 import fitz  # PyMuPDF
 from flask import Flask, render_template_string, request, jsonify
