@@ -1,10 +1,8 @@
 name: Build PDF Property Validator
-
 on:
   push:
     branches: [ main ]
   workflow_dispatch:  # Allows manual trigger from GitHub UI
-
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -21,11 +19,11 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install flask PyMuPDF pyinstaller
+        pip install flask PyMuPDF pyinstaller pandas openpyxl
     
     - name: Build executable
       run: |
-        pyinstaller --onefile --name "PDFPropertyValidator" pdf_validator_app.py
+        pyinstaller --onefile --name "PDFPropertyValidator" pdf_checker.py
     
     - name: Get version info
       id: version
