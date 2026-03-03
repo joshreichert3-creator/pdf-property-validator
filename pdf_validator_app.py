@@ -17,7 +17,7 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max
 CONFIG = {
     "MAX_PAGES": 10000,
     "REQUEST_TIMEOUT": 3600,
-    "PROPERTY_FEES_FILE": os.path.join(os.path.dirname(os.path.abspath(__file__)), "property_fees.xlsx")
+    "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx")
 }
 
 # ---------------------------------------------------------------------------
