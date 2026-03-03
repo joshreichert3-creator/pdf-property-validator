@@ -281,6 +281,49 @@ HTML_TEMPLATE = """
 # ---------------------------------------------------------------------------
 # Management fee validation using per-property lookup
 # ---------------------------------------------------------------------------
+def normalize_code(code):
+    """Lowercase, strip whitespace, remove common punctuation for fuzzy comparison."""
+    return re.sub(r'[\s\-_/\.,]', '', str(code).lower().strip())
+
+def find_property_fee(prop_code):
+    """
+    Try to find a matching property in PROPERTY_FEES.
+    1. Exact match
+    2. Case/whitespace-insensitive match
+    3. Fuzzy match (ignore dashes, spaces, punctuation)
+    Returns the matched fee entry and the matched key, or (None, None).
+    """
+    # 1. Exact match
+    if prop_code in PROPERTY_FEES:
+        return PROPERTY_FEES[prop_code], prop_code
+
+    # 2. Normalized match (case + whitespace insensitive)
+    normalized_input = normalize_code(prop_code)
+    for key, entry in PROPERTY_FEES.items():
+        if normalize_code(key) == normalized_input:
+            return entry, key
+
+    # 3. Fuzzy match — accept if normalized codes share enough characters
+    best_match_key = None
+    best_score = 0
+    for key in PROPERTY_FEES:
+        nk = normalize_code(key)
+        ni = normalized_input
+        # Simple similarity: length of common prefix + matching chars ratio
+        shorter = min(len(nk), len(ni))
+        if shorter == 0:
+            continue
+        matches = sum(a == b for a, b in zip(nk, ni))
+        score = matches / max(len(nk), len(ni))
+        if score > best_score:
+            best_score = score
+            best_match_key = key
+
+    if best_score >= 0.85 and best_match_key:
+        return PROPERTY_FEES[best_match_key], best_match_key
+
+    return None, None
+
 def validate_management_fee(prop_code, management_fee_dollar_extracted, management_fee_percent_extracted):
     """
     Returns a list of result dicts and updates has_failures / failed_checks_for_summary.
@@ -291,7 +334,16 @@ def validate_management_fee(prop_code, management_fee_dollar_extracted, manageme
     failed_checks = []
 
     # Look up this property in the fee table
-    fee_entry = PROPERTY_FEES.get(prop_code)
+    fee_entry, matched_key = find_property_fee(prop_code)
+    
+    if matched_key and matched_key != prop_code:
+        # Log that we used a fuzzy match
+        results.append({
+            "check": "Management Fee — Property Lookup",
+            "value": f"'{prop_code}' matched to '{matched_key}'",
+            "expected": "Exact or close match found",
+            "status": "INFO"
+        })
 
     if fee_entry is None:
         # Property not found in lookup file — FAIL
