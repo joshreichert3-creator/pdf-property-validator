@@ -17,7 +17,7 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max
 CONFIG = {
     "management_fee_percent_min": 3.0,
     "management_fee_percent_max": 6.0,
-    "management_fee_percent_allowed": [3.0, 3.5, 3.75, 4.0, 4.5, 5.0, 5.5, 6.0],
+    "management_fee_percent_allowed": [3.0, 3.25, 3.5, 3.75, 4.0, 4.25, 4.5, 4.75, 5.0, 5.25, 5.5, 5.75, 6.0],
     "management_fee_dollar_min": 95.0,
     "management_fee_dollar_max": 250.0,
     "MAX_PAGES": 10000,
@@ -573,7 +573,7 @@ def parse_pdf(file_stream):
             
             if management_fee_percent_extracted is not None:
                 for allowed_value in CONFIG["management_fee_percent_allowed"]:
-                    if abs(management_fee_percent_extracted - allowed_value) < 0.01:
+                    if abs(management_fee_percent_extracted - allowed_value) < 0.001:
                         management_fee_percent_passes = True
                         break
 
