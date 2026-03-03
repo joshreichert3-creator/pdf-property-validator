@@ -662,8 +662,15 @@ def parse_pdf(file_stream):
                 expected_status_text = "Match (No Negative Past Due, No Prepaid Liability)"
                 match_status_for_display = "PASS"
             elif total_negative_past_due_sum >= 0:
-                expected_status_text = "N/A (No Negative Past Due to Compare)"
-                match_status_for_display = "INFO"
+                if prepaid_rent_liability_value is not None and prepaid_rent_liability_value > 0:
+                    # Prepaid liability exists but no negative past due found — mismatch
+                    expected_status_text = f"No Match (Expected {prepaid_rent_liability_value:,.2f}, no negative past due found)"
+                    match_status_for_display = "FAIL"
+                    has_failures = True
+                    failed_checks_for_summary.append("Sum of Negative Past Due (Rent Roll)")
+                else:
+                    expected_status_text = "N/A (No Negative Past Due to Compare)"
+                    match_status_for_display = "INFO"
             elif prepaid_rent_liability_value is None:
                 expected_status_text = "N/A (Prepaid Liability Not Found for Comparison)"
                 match_status_for_display = "INFO"
