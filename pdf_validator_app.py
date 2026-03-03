@@ -15,15 +15,51 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max
 
 CONFIG = {
-    "management_fee_percent_min": 3.0,
-    "management_fee_percent_max": 6.0,
-    "management_fee_percent_allowed": [3.0, 3.25, 3.5, 3.75, 4.0, 4.25, 4.5, 4.75, 5.0, 5.25, 5.5, 5.75, 6.0],
-    "management_fee_dollar_min": 95.0,
-    "management_fee_dollar_max": 250.0,
     "MAX_PAGES": 10000,
-    "REQUEST_TIMEOUT": 3600
+    "REQUEST_TIMEOUT": 3600,
+    "PROPERTY_FEES_FILE": os.path.join(os.path.dirname(os.path.abspath(__file__)), "property_fees.xlsx")
 }
 
+# ---------------------------------------------------------------------------
+# Load property fee lookup from xlsx at startup
+# ---------------------------------------------------------------------------
+PROPERTY_FEES = {}  # { "PROP001": {"fee_percent": 5.0, "min_dollar_charge": 150.0}, ... }
+FEES_FILE_ERROR = None
+
+def load_property_fees():
+    global PROPERTY_FEES, FEES_FILE_ERROR
+    path = CONFIG["PROPERTY_FEES_FILE"]
+    if not os.path.exists(path):
+        FEES_FILE_ERROR = f"property_fees.xlsx not found at: {path}"
+        print(f"WARNING: {FEES_FILE_ERROR}")
+        return
+
+    try:
+        import pandas as pd
+        df = pd.read_excel(path, sheet_name="Property Fees", dtype={"property_code": str})
+        required_cols = {"property_code", "fee_percent", "min_dollar_charge"}
+        if not required_cols.issubset(set(df.columns)):
+            FEES_FILE_ERROR = f"property_fees.xlsx is missing required columns: {required_cols - set(df.columns)}"
+            print(f"WARNING: {FEES_FILE_ERROR}")
+            return
+
+        for _, row in df.iterrows():
+            code = str(row["property_code"]).strip()
+            if code:
+                PROPERTY_FEES[code] = {
+                    "fee_percent": float(row["fee_percent"]) if pd.notna(row["fee_percent"]) else None,
+                    "min_dollar_charge": float(row["min_dollar_charge"]) if pd.notna(row["min_dollar_charge"]) else None,
+                }
+        print(f"Loaded {len(PROPERTY_FEES)} properties from property_fees.xlsx")
+    except Exception as e:
+        FEES_FILE_ERROR = f"Failed to load property_fees.xlsx: {e}"
+        print(f"WARNING: {FEES_FILE_ERROR}")
+
+load_property_fees()
+
+# ---------------------------------------------------------------------------
+# HTML Template
+# ---------------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -57,6 +93,7 @@ HTML_TEMPLATE = """
     .alert { padding: 15px; border-radius: 4px; margin-bottom: 20px; }
     .alert-error { background: #fee; color: #c33; border-left: 4px solid #c33; }
     .alert-success { background: #efe; color: #3a3; border-left: 4px solid #3a3; }
+    .alert-warning { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
     h2 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 8px; margin: 30px 0 20px 0; font-size: 22px; }
     h3 { color: #007bff; margin: 25px 0 15px 0; font-size: 18px; }
     table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
@@ -78,12 +115,24 @@ HTML_TEMPLATE = """
     .stat-number { font-size: 32px; font-weight: bold; margin-bottom: 5px; }
     .stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
     .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center; color: #999; font-size: 12px; }
+    .fees-status { font-size: 13px; margin-bottom: 15px; padding: 10px 14px; border-radius: 4px; }
+    .fees-ok { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
+    .fees-error { background: #fee; color: #c33; border-left: 4px solid #c33; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>🏠 PDF Property Validator</h1>
     <p class="subtitle">Upload your property statement PDF to validate cash balances, management fees, and rent roll data.</p>
+
+    <div id="feesStatus" class="fees-status {{ 'fees-ok' if not fees_error else 'fees-error' }}">
+      {% if fees_error %}
+        ⚠️ Fee lookup file error: {{ fees_error }}
+      {% else %}
+        ✅ Fee lookup loaded: {{ fees_count }} properties from property_fees.xlsx
+      {% endif %}
+    </div>
+
     <div class="upload-section">
       <input type="file" id="file" accept="application/pdf" />
       <br>
@@ -96,7 +145,7 @@ HTML_TEMPLATE = """
     <hr class="hidden" id="divider">
     <div id="summary"></div>
     <div id="results"></div>
-    <div class="footer">PDF Property Validator v1.0 | Close this browser window to exit the application</div>
+    <div class="footer">PDF Property Validator v1.1 | Close this browser window to exit the application</div>
   </div>
   <script>
     async function checkPDF() {
@@ -108,49 +157,49 @@ HTML_TEMPLATE = """
       const divider = document.getElementById("divider");
       const checkBtn = document.getElementById("checkBtn");
       const btnText = document.getElementById("btnText");
-      
+
       resultsDiv.innerHTML = ""; summaryDiv.innerHTML = "";
       alertDiv.className = "hidden"; statsDiv.className = "hidden"; divider.className = "hidden";
-      
+
       const file = fileInput.files[0];
       if (!file) { showAlert("Please select a PDF file first.", "error"); return; }
-      
+
       checkBtn.disabled = true;
       btnText.innerHTML = '<span class="loader"></span>Processing PDF... This may take several minutes for large files';
-      
+
       const formData = new FormData();
       formData.append("file", file);
-      
+
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 7200000);
-        
-        const response = await fetch("/check_pdf", { 
+
+        const response = await fetch("/check_pdf", {
           method: "POST", body: formData, signal: controller.signal
         });
         clearTimeout(timeoutId);
-        
+
         if (!response.ok) {
           const errorText = await response.text();
           throw new Error(`Server error (${response.status}): ${errorText.substring(0, 100)}`);
         }
-        
+
         const contentType = response.headers.get("content-type");
         if (!contentType || !contentType.includes("application/json")) {
           const errorText = await response.text();
           console.error("Non-JSON response:", errorText);
           throw new Error("Server returned an error instead of results. The PDF may be too large or complex.");
         }
-        
+
         const data = await response.json();
         if (data.error) { showAlert(data.error, "error"); return; }
-        
+
         divider.className = "";
-        
+
         let totalProperties = data.detailed_checks.length;
         let propertiesWithFailures = data.failing_summary ? data.failing_summary.length : 0;
         let propertiesPassing = totalProperties - propertiesWithFailures;
-        
+
         statsDiv.className = "stats";
         statsDiv.innerHTML = `
           <div class="stat-box pass">
@@ -162,7 +211,7 @@ HTML_TEMPLATE = """
             <div class="stat-label">Failing</div>
           </div>
         `;
-        
+
         if (data.failing_summary && data.failing_summary.length > 0) {
           let summaryHtml = "<h2>⚠️ Properties with Failures</h2>";
           summaryHtml += "<table class='summary-table'>";
@@ -178,7 +227,7 @@ HTML_TEMPLATE = """
         } else {
           showAlert("🎉 All properties passed all validation checks!", "success");
         }
-        
+
         let detailedHtml = "<h2>📋 Detailed Validation Results</h2>";
         data.detailed_checks.forEach(p => {
           detailedHtml += `<h3>${escapeHtml(p.property)}</h3><table>
@@ -195,7 +244,7 @@ HTML_TEMPLATE = """
           detailedHtml += "</table>";
         });
         resultsDiv.innerHTML = detailedHtml;
-        
+
       } catch (error) {
         if (error.name === 'AbortError') {
           showAlert('Processing timed out. The PDF may be too large or complex. Try splitting it into smaller files.', "error");
@@ -207,19 +256,19 @@ HTML_TEMPLATE = """
         btnText.textContent = "Validate PDF";
       }
     }
-    
+
     function showAlert(message, type) {
       const alertDiv = document.getElementById("alert");
       alertDiv.className = type === "error" ? "alert alert-error" : "alert alert-success";
       alertDiv.textContent = message;
     }
-    
+
     function escapeHtml(text) {
       const div = document.createElement('div');
       div.textContent = text;
       return div.innerHTML;
     }
-    
+
     document.getElementById('file').addEventListener('keypress', function(e) {
       if (e.key === 'Enter') { checkPDF(); }
     });
@@ -228,6 +277,90 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ---------------------------------------------------------------------------
+# Management fee validation using per-property lookup
+# ---------------------------------------------------------------------------
+def validate_management_fee(prop_code, management_fee_dollar_extracted, management_fee_percent_extracted):
+    """
+    Returns a list of result dicts and updates has_failures / failed_checks_for_summary.
+    Returns: (results_list, has_failures, failed_checks)
+    """
+    results = []
+    has_failures = False
+    failed_checks = []
+
+    # Look up this property in the fee table
+    fee_entry = PROPERTY_FEES.get(prop_code)
+
+    if fee_entry is None:
+        # Property not found in lookup file — FAIL
+        has_failures = True
+        failed_checks.append("Property Not in Fee Lookup File")
+        results.append({
+            "check": "Management Fee — Property Lookup",
+            "value": f"'{prop_code}' not found in property_fees.xlsx",
+            "expected": "Property must be listed in property_fees.xlsx",
+            "status": "FAIL"
+        })
+        return results, has_failures, failed_checks
+
+    expected_percent = fee_entry.get("fee_percent")
+    expected_dollar  = fee_entry.get("min_dollar_charge")
+
+    # --- Percent check ---
+    if expected_percent is not None:
+        if management_fee_percent_extracted is not None:
+            passes = abs(management_fee_percent_extracted - expected_percent) < 0.001
+            status = "PASS" if passes else "FAIL"
+            if not passes:
+                has_failures = True
+                failed_checks.append("Management Fee (%) Mismatch")
+            results.append({
+                "check": "Management Fee (%) Match",
+                "value": f"{management_fee_percent_extracted:.2f}%",
+                "expected": f"{expected_percent:.2f}%",
+                "status": status
+            })
+        else:
+            has_failures = True
+            failed_checks.append("Management Fee (%) Not Found")
+            results.append({
+                "check": "Management Fee (%) Match",
+                "value": "N/A (Not Found)",
+                "expected": f"{expected_percent:.2f}%",
+                "status": "FAIL"
+            })
+
+    # --- Dollar check ---
+    if expected_dollar is not None:
+        if management_fee_dollar_extracted is not None:
+            passes = abs(management_fee_dollar_extracted - expected_dollar) < 0.01
+            status = "PASS" if passes else "FAIL"
+            if not passes:
+                has_failures = True
+                failed_checks.append("Management Fee ($) Mismatch")
+            results.append({
+                "check": "Management Fee ($) Match",
+                "value": f"${management_fee_dollar_extracted:,.2f}",
+                "expected": f"${expected_dollar:,.2f}",
+                "status": status
+            })
+        else:
+            has_failures = True
+            failed_checks.append("Management Fee ($) Not Found")
+            results.append({
+                "check": "Management Fee ($) Match",
+                "value": "N/A (Not Found)",
+                "expected": f"${expected_dollar:,.2f}",
+                "status": "FAIL"
+            })
+
+    return results, has_failures, failed_checks
+
+
+# ---------------------------------------------------------------------------
+# PDF parsing
+# ---------------------------------------------------------------------------
 def parse_pdf(file_stream):
     tmp_path = None
     doc = None
@@ -244,13 +377,13 @@ def parse_pdf(file_stream):
         doc = fitz.open(tmp_path)
         property_page_map = {}
         current_property_key = None
-        
+
         all_pages_text_by_num = {p_num: doc.load_page(p_num).get_text("text") for p_num in range(doc.page_count)}
 
         for page_num, page_text in all_pages_text_by_num.items():
             if page_num >= CONFIG["MAX_PAGES"]:
                 break
-            
+
             property_header_line = None
             for line in page_text.splitlines():
                 if line.strip().startswith("Properties:"):
@@ -275,10 +408,10 @@ def parse_pdf(file_stream):
                             property_page_map[current_property_key] = []
                 except ValueError:
                     if current_property_key is None:
-                         current_property_key = ("UNKNOWN", "UNKNOWN (Header Parse Error)")
-                         if current_property_key not in property_page_map:
+                        current_property_key = ("UNKNOWN", "UNKNOWN (Header Parse Error)")
+                        if current_property_key not in property_page_map:
                             property_page_map[current_property_key] = []
-            
+
             if current_property_key:
                 property_page_map[current_property_key].append(page_num)
             else:
@@ -287,7 +420,7 @@ def parse_pdf(file_stream):
                 property_page_map[("UNASSIGNED", "NO_HEADER")].append(page_num)
 
         for (prop_code, prop_address), relevant_page_nums_for_prop in property_page_map.items():
-            
+
             cash_in_bank_operating = None
             actual_ending_cash = None
             management_fee_dollar_extracted = None
@@ -343,21 +476,21 @@ def parse_pdf(file_stream):
                 if "Prepaid Rent Liability" in stripped_line and prepaid_rent_liability_value is None:
                     match = re.search(r"Prepaid Rent Liability.*?([-]?[\d,]+\.?\d{0,2})", stripped_line, re.IGNORECASE)
                     if match:
-                        try: 
+                        try:
                             value = float(match.group(1).replace(",", ""))
                             if value >= 0:
                                 prepaid_rent_liability_value = value
                         except ValueError: pass
-                    
+
                     if prepaid_rent_liability_value is None and i + 1 < len(lines_for_extraction):
-                         next_line = lines_for_extraction[i+1].strip()
-                         match = standalone_number_pattern.match(next_line)
-                         if match:
-                             try: 
-                                 value = float(match.group(1).replace(",", ""))
-                                 if value >= 0:
-                                     prepaid_rent_liability_value = value
-                             except ValueError: pass
+                        next_line = lines_for_extraction[i+1].strip()
+                        match = standalone_number_pattern.match(next_line)
+                        if match:
+                            try:
+                                value = float(match.group(1).replace(",", ""))
+                                if value >= 0:
+                                    prepaid_rent_liability_value = value
+                            except ValueError: pass
                     break
 
             # Rent Roll Logic
@@ -366,7 +499,7 @@ def parse_pdf(file_stream):
             header_y_coord = -1
             number_pattern_for_past_due = re.compile(r"([-]?[\d,]+\.?\d{0,2})")
             expected_header_phrases = ["Unit", "Tenant", "Additional Tenants", "Status", "Rent", "Deposit", "Move-in", "Lease From", "Lease To", "Past Due"]
-            
+
             rent_roll_page_num = -1
             rent_roll_title_y = -1
             rent_word_pattern = re.compile(r"rent", re.IGNORECASE)
@@ -394,19 +527,17 @@ def parse_pdf(file_stream):
                 if rent_roll_page_num != -1:
                     break
 
-            if rent_roll_page_num == -1:
-                pass
-            else:
+            if rent_roll_page_num != -1:
                 all_property_words = doc.load_page(rent_roll_page_num).get_text("words")
-                
+
                 if rent_roll_title_y != -1:
                     all_property_words = [word for word in all_property_words if word[1] > rent_roll_title_y + 30]
-                
+
                 all_property_words.sort(key=lambda w: (w[1], w[0]))
 
                 reconstructed_lines_of_words = []
                 line_y_group_tolerance = 1
-                
+
                 if all_property_words:
                     current_line_words_group = []
                     current_line_y_sum = 0
@@ -414,7 +545,7 @@ def parse_pdf(file_stream):
 
                     for word in all_property_words:
                         word_y_center = (word[1] + word[3]) / 2
-                        
+
                         if not current_line_words_group:
                             current_line_words_group.append(word)
                             current_line_y_sum += word_y_center
@@ -433,10 +564,10 @@ def parse_pdf(file_stream):
 
                     if current_line_words_group:
                         reconstructed_lines_of_words.append(current_line_words_group)
-                
+
                 for line_idx, current_line_words_for_reco in enumerate(reconstructed_lines_of_words):
                     current_line_words_for_reco.sort(key=lambda w: w[0])
-                    
+
                     y_key = round(current_line_words_for_reco[0][1])
                     full_line_text = " ".join([w[4] for w in current_line_words_for_reco])
 
@@ -444,15 +575,15 @@ def parse_pdf(file_stream):
                         found_all_phrases_in_sequence = True
                         current_search_text = full_line_text
                         past_due_word_bbox_in_header = None
-                        
+
                         for i, phrase in enumerate(expected_header_phrases):
                             phrase_pattern = r'\b' + re.escape(phrase) + r'\b'
                             match = re.search(phrase_pattern, current_search_text, re.IGNORECASE)
-                            
+
                             if not match:
                                 found_all_phrases_in_sequence = False
                                 break
-                            
+
                             if phrase == "Past Due":
                                 _past_word_temp = None
                                 _due_word_temp = None
@@ -461,13 +592,13 @@ def parse_pdf(file_stream):
                                         _past_word_temp = word_bbox
                                     elif re.search(r'\bDue\b', word_bbox[4], re.IGNORECASE):
                                         _due_word_temp = word_bbox
-                                    
+
                                     if _past_word_temp and _due_word_temp and abs(_due_word_temp[1] - _past_word_temp[1]) < 5 and (_due_word_temp[0] - _past_word_temp[2]) < 10:
                                         past_due_word_bbox_in_header = (_past_word_temp[0], _past_word_temp[1], _due_word_temp[2], _due_word_temp[3])
                                         break
                                     elif re.search(r'\bPast\s*Due\b', word_bbox[4], re.IGNORECASE):
-                                         past_due_word_bbox_in_header = word_bbox
-                                         break
+                                        past_due_word_bbox_in_header = word_bbox
+                                        break
                                 if not past_due_word_bbox_in_header:
                                     found_all_phrases_in_sequence = False
                                     break
@@ -478,7 +609,7 @@ def parse_pdf(file_stream):
                             header_y_coord = y_key
                             temp_past_due_x0 = past_due_word_bbox_in_header[0]
                             temp_past_due_x1 = past_due_word_bbox_in_header[2]
-                            
+
                             if temp_past_due_x0 != float('inf'):
                                 past_due_col_x0 = temp_past_due_x0 - 5
                                 past_due_col_x1 = temp_past_due_x1 + 5
@@ -486,7 +617,7 @@ def parse_pdf(file_stream):
                                 header_y_coord = -1
                                 past_due_col_x0 = -1
                                 past_due_col_x1 = -1
-                    
+
                     if header_y_coord != -1 and past_due_col_x0 != -1 and past_due_col_x1 != -1:
                         if y_key == header_y_coord:
                             continue
@@ -496,12 +627,12 @@ def parse_pdf(file_stream):
                             x0, y0, x1, y1, text_content, *_ = word
                             if (x0 < past_due_col_x1 + 5 and x1 > past_due_col_x0 - 5):
                                 extracted_words_in_column.append(text_content)
-                        
+
                         column_content = " ".join(extracted_words_in_column).strip()
 
                         is_grand_total_line = bool(re.search(r'\bGrand\s*Total\b', full_line_text, re.IGNORECASE))
                         is_long_separator_line = bool(re.match(r"^\s*[-=]{10,}\s*$", full_line_text))
-                        
+
                         if (is_grand_total_line and y_key > header_y_coord) or \
                            (is_long_separator_line and y_key > header_y_coord + 10 and line_idx > 5):
                             break
@@ -517,15 +648,19 @@ def parse_pdf(file_stream):
                                                           bool(re.search(r'\d{1,3}(?:[,\.]\d{3})*(?:[,\.]\d+)?\s*%', full_line_text, re.IGNORECASE))
                                         is_walnut_exclusion = bool(re.search(r'walnut\d+ - \d+', full_line_text, re.IGNORECASE))
 
-                                        if numeric_value < 0 and not is_summary_line and not is_walnut_exclusion: 
+                                        if numeric_value < 0 and not is_summary_line and not is_walnut_exclusion:
                                             total_negative_past_due_sum += numeric_value
                                     except ValueError:
                                         pass
 
+            # -------------------------------------------------------------------
+            # Build results
+            # -------------------------------------------------------------------
             property_results = []
             has_failures = False
             failed_checks_for_summary = []
 
+            # Cash in Bank - Operating
             if cash_in_bank_operating is not None:
                 status = "PASS" if cash_in_bank_operating > 0 else "FAIL"
                 if status == "FAIL":
@@ -538,13 +673,14 @@ def parse_pdf(file_stream):
                     "status": status
                 })
             else:
-                 property_results.append({
+                property_results.append({
                     "check": "Cash in Bank - Operating Positive",
                     "value": "N/A (Not Found)",
                     "expected": "> $0",
                     "status": "INFO"
                 })
 
+            # Actual Ending Cash
             if actual_ending_cash is not None:
                 status = "PASS" if actual_ending_cash > 0 else "FAIL"
                 if status == "FAIL":
@@ -557,72 +693,23 @@ def parse_pdf(file_stream):
                     "status": status
                 })
             else:
-                 property_results.append({
+                property_results.append({
                     "check": "Actual Ending Cash Positive",
                     "value": "N/A (Not Found)",
                     "expected": "> $0",
                     "status": "INFO"
                 })
 
-            management_fee_dollar_passes = False
-            management_fee_percent_passes = False
-
-            if management_fee_dollar_extracted is not None:
-                if (CONFIG["management_fee_dollar_min"] <= management_fee_dollar_extracted <= CONFIG["management_fee_dollar_max"]):
-                    management_fee_dollar_passes = True
-            
-            if management_fee_percent_extracted is not None:
-                for allowed_value in CONFIG["management_fee_percent_allowed"]:
-                    if abs(management_fee_percent_extracted - allowed_value) < 0.001:
-                        management_fee_percent_passes = True
-                        break
-
-            if management_fee_dollar_extracted is None and management_fee_percent_extracted is None:
-                final_management_fee_status = "FAIL"
+            # Management Fee — per-property lookup
+            fee_results, fee_has_failures, fee_failed_checks = validate_management_fee(
+                prop_code, management_fee_dollar_extracted, management_fee_percent_extracted
+            )
+            property_results.extend(fee_results)
+            if fee_has_failures:
                 has_failures = True
-                failed_checks_for_summary.append("Management Fee Not Found")
-            elif management_fee_dollar_passes or management_fee_percent_passes:
-                final_management_fee_status = "PASS"
-            else:
-                final_management_fee_status = "FAIL"
-                has_failures = True
-                if management_fee_dollar_extracted is not None and not management_fee_dollar_passes:
-                    failed_checks_for_summary.append("Management Fee ($) out of Range")
-                if management_fee_percent_extracted is not None and not management_fee_percent_passes:
-                    failed_checks_for_summary.append("Management Fee (%) out of Range")
+                failed_checks_for_summary.extend(fee_failed_checks)
 
-            if management_fee_dollar_extracted is not None:
-                property_results.append({
-                    "check": "Management Fee ($) in Range",
-                    "value": f"${management_fee_dollar_extracted:,.2f}",
-                    "expected": f"${CONFIG['management_fee_dollar_min']:.2f} - ${CONFIG['management_fee_dollar_max']:.2f}",
-                    "status": final_management_fee_status
-                })
-            else:
-                property_results.append({
-                    "check": "Management Fee ($) in Range",
-                    "value": "N/A (Not Found)",
-                    "expected": f"${CONFIG['management_fee_dollar_min']:.2f} - ${CONFIG['management_fee_dollar_max']:.2f}",
-                    "status": final_management_fee_status
-                })
-
-            if management_fee_percent_extracted is not None:
-                allowed_values_str = ", ".join([f"{v:.2f}%" if v != int(v) else f"{int(v)}%" for v in CONFIG["management_fee_percent_allowed"]])
-                property_results.append({
-                    "check": "Management Fee (%) in Range",
-                    "value": f"{management_fee_percent_extracted:.2f}%",
-                    "expected": f"One of: {allowed_values_str}",
-                    "status": final_management_fee_status
-                })
-            else:
-                allowed_values_str = ", ".join([f"{v:.2f}%" if v != int(v) else f"{int(v)}%" for v in CONFIG["management_fee_percent_allowed"]])
-                property_results.append({
-                    "check": "Management Fee (%) in Range",
-                    "value": "N/A (Not Found)",
-                    "expected": f"One of: {allowed_values_str}",
-                    "status": final_management_fee_status
-                })
-
+            # Prepaid Rent Liability
             if prepaid_rent_liability_value is not None:
                 status = "PASS" if prepaid_rent_liability_value >= 0 else "FAIL"
                 if status == "FAIL":
@@ -642,6 +729,7 @@ def parse_pdf(file_stream):
                     "status": "INFO"
                 })
 
+            # Sum of Negative Past Due vs Prepaid Rent Liability
             expected_status_text = "N/A (Calculated Sum)"
             match_status_for_display = "INFO"
             display_value = "N/A (No negative values found)"
@@ -649,7 +737,7 @@ def parse_pdf(file_stream):
                 display_value = f"${total_negative_past_due_sum:,.2f}"
 
             if total_negative_past_due_sum < 0 and prepaid_rent_liability_value is not None:
-                epsilon = 0.001 
+                epsilon = 0.001
                 if abs(abs(total_negative_past_due_sum) - prepaid_rent_liability_value) < epsilon:
                     expected_status_text = "Match"
                     match_status_for_display = "PASS"
@@ -663,7 +751,6 @@ def parse_pdf(file_stream):
                 match_status_for_display = "PASS"
             elif total_negative_past_due_sum >= 0:
                 if prepaid_rent_liability_value is not None and prepaid_rent_liability_value > 0:
-                    # Prepaid liability exists but no negative past due found — mismatch
                     expected_status_text = f"No Match (Expected {prepaid_rent_liability_value:,.2f}, no negative past due found)"
                     match_status_for_display = "FAIL"
                     has_failures = True
@@ -674,7 +761,7 @@ def parse_pdf(file_stream):
             elif prepaid_rent_liability_value is None:
                 expected_status_text = "N/A (Prepaid Liability Not Found for Comparison)"
                 match_status_for_display = "INFO"
-            
+
             property_results.append({
                 "check": "Sum of Negative Past Due (Rent Roll)",
                 "value": display_value,
@@ -701,9 +788,18 @@ def parse_pdf(file_stream):
 
     return {"detailed_checks": final_property_checks, "failing_summary": failing_properties_summary}
 
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    from flask import render_template_string
+    return render_template_string(
+        HTML_TEMPLATE,
+        fees_error=FEES_FILE_ERROR,
+        fees_count=len(PROPERTY_FEES)
+    )
 
 @app.route('/check_pdf', methods=['POST'])
 def check_pdf():
@@ -730,6 +826,10 @@ def check_pdf():
     else:
         return jsonify({'error': 'Invalid file type. Please upload a PDF.'}), 400
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
@@ -747,10 +847,10 @@ if __name__ == '__main__':
         sys.stdout.reconfigure(line_buffering=True)
     except:
         pass
-    
+
     port = find_free_port()
     threading.Thread(target=open_browser, args=(port,), daemon=True).start()
-    
+
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║         🏠 PDF Property Validator is Running            ║
@@ -759,10 +859,10 @@ if __name__ == '__main__':
 ║  Press Ctrl+C to stop the application                   ║
 ╚══════════════════════════════════════════════════════════╝
     """)
-    
+
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.WARNING)
-    
+
     from werkzeug.serving import run_simple
     run_simple('127.0.0.1', port, app, use_reloader=False, use_debugger=False, threaded=True)
