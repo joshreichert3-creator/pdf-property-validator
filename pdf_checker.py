@@ -333,8 +333,17 @@ def validate_management_fee(prop_code, management_fee_dollar_extracted, manageme
     has_failures = False
     failed_checks = []
 
+    # Debug: print what we're trying to match
+    print(f"DEBUG - Looking up property code: '{prop_code}' (len={len(prop_code)})")
+    print(f"DEBUG - Normalized: '{normalize_code(prop_code)}'")
+    print(f"DEBUG - First 5 keys in PROPERTY_FEES: {list(PROPERTY_FEES.keys())[:5]}")
+    if PROPERTY_FEES:
+        sample_key = list(PROPERTY_FEES.keys())[0]
+        print(f"DEBUG - Sample key normalized: '{normalize_code(sample_key)}'")
+
     # Look up this property in the fee table
     fee_entry, matched_key = find_property_fee(prop_code)
+    print(f"DEBUG - Match result: '{matched_key}'")
     
     if matched_key and matched_key != prop_code:
         # Log that we used a fuzzy match
