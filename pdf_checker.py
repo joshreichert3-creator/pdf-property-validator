@@ -300,8 +300,9 @@ def find_property_fee(prop_code):
     normalized_input = normalize_code(prop_code)
 
     for key, entry in PROPERTY_FEES.items():
-        # Extract just the code portion before ' - ' in the Excel key
-        code_portion = key.split(' - ')[0].split(' / ')[0].strip()
+        # Extract just the code portion before the first dash or slash separator
+        # Handles: 'CODE - address', 'CODE- address', 'CODE -address', 'CODE / address'
+        code_portion = re.split(r'\s*[-/]\s*', key)[0].strip()
 
         # 2. Exact match against code portion
         if prop_code.strip() == code_portion:
