@@ -289,38 +289,27 @@ def find_property_fee(prop_code):
     """
     Try to find a matching property in PROPERTY_FEES.
     1. Exact match
-    2. Case/whitespace-insensitive match
-    3. Fuzzy match (ignore dashes, spaces, punctuation)
+    2. Match against just the code portion (before the ' - ') of the Excel key
+    3. Normalized match (case/whitespace insensitive) against code portion
     Returns the matched fee entry and the matched key, or (None, None).
     """
     # 1. Exact match
     if prop_code in PROPERTY_FEES:
         return PROPERTY_FEES[prop_code], prop_code
 
-    # 2. Normalized match (case + whitespace insensitive)
     normalized_input = normalize_code(prop_code)
+
     for key, entry in PROPERTY_FEES.items():
-        if normalize_code(key) == normalized_input:
+        # Extract just the code portion before ' - ' in the Excel key
+        code_portion = key.split(' - ')[0].split(' / ')[0].strip()
+
+        # 2. Exact match against code portion
+        if prop_code.strip() == code_portion:
             return entry, key
 
-    # 3. Fuzzy match — accept if normalized codes share enough characters
-    best_match_key = None
-    best_score = 0
-    for key in PROPERTY_FEES:
-        nk = normalize_code(key)
-        ni = normalized_input
-        # Simple similarity: length of common prefix + matching chars ratio
-        shorter = min(len(nk), len(ni))
-        if shorter == 0:
-            continue
-        matches = sum(a == b for a, b in zip(nk, ni))
-        score = matches / max(len(nk), len(ni))
-        if score > best_score:
-            best_score = score
-            best_match_key = key
-
-    if best_score >= 0.85 and best_match_key:
-        return PROPERTY_FEES[best_match_key], best_match_key
+        # 3. Normalized match against code portion
+        if normalize_code(code_portion) == normalized_input:
+            return entry, key
 
     return None, None
 
@@ -333,17 +322,8 @@ def validate_management_fee(prop_code, management_fee_dollar_extracted, manageme
     has_failures = False
     failed_checks = []
 
-    # Debug: print what we're trying to match
-    print(f"DEBUG - Looking up property code: '{prop_code}' (len={len(prop_code)})")
-    print(f"DEBUG - Normalized: '{normalize_code(prop_code)}'")
-    print(f"DEBUG - First 5 keys in PROPERTY_FEES: {list(PROPERTY_FEES.keys())[:5]}")
-    if PROPERTY_FEES:
-        sample_key = list(PROPERTY_FEES.keys())[0]
-        print(f"DEBUG - Sample key normalized: '{normalize_code(sample_key)}'")
-
     # Look up this property in the fee table
     fee_entry, matched_key = find_property_fee(prop_code)
-    print(f"DEBUG - Match result: '{matched_key}'")
     
     if matched_key and matched_key != prop_code:
         # Log that we used a fuzzy match
