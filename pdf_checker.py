@@ -349,52 +349,59 @@ def validate_management_fee(prop_code, management_fee_dollar_extracted, manageme
     expected_percent = fee_entry.get("fee_percent")
     expected_dollar  = fee_entry.get("min_dollar_charge")
 
-    # --- Percent check ---
+    # Check each individually
+    percent_passes = False
+    dollar_passes = False
+
+    if expected_percent is not None and management_fee_percent_extracted is not None:
+        percent_passes = abs(management_fee_percent_extracted - expected_percent) < 0.001
+
+    if expected_dollar is not None and management_fee_dollar_extracted is not None:
+        dollar_passes = abs(management_fee_dollar_extracted - expected_dollar) < 0.01
+
+    # PASS if either matches — % will normally be higher than $ minimum which is expected
+    either_passes = percent_passes or dollar_passes
+    overall_status = "PASS" if either_passes else "FAIL"
+
+    if not either_passes:
+        has_failures = True
+        if management_fee_percent_extracted is None and management_fee_dollar_extracted is None:
+            failed_checks.append("Management Fee Not Found")
+        else:
+            failed_checks.append("Management Fee Mismatch")
+
+    # --- Percent row ---
     if expected_percent is not None:
         if management_fee_percent_extracted is not None:
-            passes = abs(management_fee_percent_extracted - expected_percent) < 0.001
-            status = "PASS" if passes else "FAIL"
-            if not passes:
-                has_failures = True
-                failed_checks.append("Management Fee (%) Mismatch")
             results.append({
                 "check": "Management Fee (%) Match",
                 "value": f"{management_fee_percent_extracted:.2f}%",
                 "expected": f"{expected_percent:.2f}%",
-                "status": status
+                "status": "PASS" if percent_passes else overall_status
             })
         else:
-            has_failures = True
-            failed_checks.append("Management Fee (%) Not Found")
             results.append({
                 "check": "Management Fee (%) Match",
                 "value": "N/A (Not Found)",
                 "expected": f"{expected_percent:.2f}%",
-                "status": "FAIL"
+                "status": "INFO"
             })
 
-    # --- Dollar check ---
+    # --- Dollar row ---
     if expected_dollar is not None:
         if management_fee_dollar_extracted is not None:
-            passes = abs(management_fee_dollar_extracted - expected_dollar) < 0.01
-            status = "PASS" if passes else "FAIL"
-            if not passes:
-                has_failures = True
-                failed_checks.append("Management Fee ($) Mismatch")
             results.append({
                 "check": "Management Fee ($) Match",
                 "value": f"${management_fee_dollar_extracted:,.2f}",
                 "expected": f"${expected_dollar:,.2f}",
-                "status": status
+                "status": "PASS" if dollar_passes else overall_status
             })
         else:
-            has_failures = True
-            failed_checks.append("Management Fee ($) Not Found")
             results.append({
                 "check": "Management Fee ($) Match",
                 "value": "N/A (Not Found)",
                 "expected": f"${expected_dollar:,.2f}",
-                "status": "FAIL"
+                "status": "INFO"
             })
 
     return results, has_failures, failed_checks
