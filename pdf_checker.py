@@ -18,7 +18,20 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max
 CONFIG = {
     "MAX_PAGES": 10000,
     "REQUEST_TIMEOUT": 3600,
-    "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx")
+    "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx"),
+    "MANAGEMENT_FEE_EXCLUDED_PROPERTIES": [
+        PALM910 - 910 Palm Avenue Huntington Beach, CA 92648
+        PALM912 - 912 Palm Avenue Huntington Beach, CA 92648
+        PALM914 - 914 Palm Avenue Huntington Beach, CA 92648
+        PALM 918 - 918 Palm Avenue Huntington Beach, CA 92648
+        PALM 922 - 922 Palm Avenue Huntington Beach, CA 92648
+        PALM916 - 916 Palm Avenue Huntington Beach, CA 92648
+        PALM920 - 920 Palm Avenue Huntington Beach, CA 92648
+        ocbeach8700 - 200
+        CLEVELAND369 - 71 - 369-371 N Cleveland Street Orange, CA 92866
+        Magnolia20332 - 20332 Magnolia Street Huntington Beach, CA 92646
+        VerdeMar9815 - 9815 Verde Mar Huntington Beach, CA 92646
+    ]
 }
 
 # ---------------------------------------------------------------------------
@@ -417,6 +430,9 @@ def parse_pdf(file_stream):
     final_property_checks = []
     failing_properties_summary = []
 
+    # Pre-compute normalised exclusion list once for the whole parse run
+    excluded_codes = [normalize_code(c) for c in CONFIG.get("MANAGEMENT_FEE_EXCLUDED_PROPERTIES", [])]
+
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             file_stream.seek(0)
@@ -750,14 +766,22 @@ def parse_pdf(file_stream):
                     "status": "INFO"
                 })
 
-            # Management Fee — per-property lookup
-            fee_results, fee_has_failures, fee_failed_checks = validate_management_fee(
-                prop_code, management_fee_dollar_extracted, management_fee_percent_extracted
-            )
-            property_results.extend(fee_results)
-            if fee_has_failures:
-                has_failures = True
-                failed_checks_for_summary.extend(fee_failed_checks)
+            # Management Fee — skip if property is in the exclusion list, otherwise validate
+            if normalize_code(prop_code) in excluded_codes:
+                property_results.append({
+                    "check": "Management Fee — Property Lookup",
+                    "value": f"'{prop_code}' is excluded from fee validation",
+                    "expected": "Excluded (no check performed)",
+                    "status": "INFO"
+                })
+            else:
+                fee_results, fee_has_failures, fee_failed_checks = validate_management_fee(
+                    prop_code, management_fee_dollar_extracted, management_fee_percent_extracted
+                )
+                property_results.extend(fee_results)
+                if fee_has_failures:
+                    has_failures = True
+                    failed_checks_for_summary.extend(fee_failed_checks)
 
             # Prepaid Rent Liability
             if prepaid_rent_liability_value is not None:
