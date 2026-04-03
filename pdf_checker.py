@@ -20,17 +20,17 @@ CONFIG = {
     "REQUEST_TIMEOUT": 3600,
     "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx"),
     "MANAGEMENT_FEE_EXCLUDED_PROPERTIES": [
-        PALM910,
-        PALM912,
-        PALM914,
-        PALM 918,
-        PALM 922,
-        PALM916,
-        PALM920,
-        ocbeach8700,
-        CLEVELAND369,
-        Magnolia20332,
-        VerdeMar9815
+        "PALM910",
+        "PALM912",
+        "PALM914",
+        "PALM 918",
+        "PALM 922",
+        "PALM916",
+        "PALM920",
+        "ocbeach8700",
+        "CLEVELAND369",
+        "Magnolia20332",
+        "VerdeMar9815",
     ]
 }
 
