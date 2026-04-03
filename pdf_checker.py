@@ -20,17 +20,17 @@ CONFIG = {
     "REQUEST_TIMEOUT": 3600,
     "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx"),
     "MANAGEMENT_FEE_EXCLUDED_PROPERTIES": [
-        # PALM910 - 910 Palm Avenue Huntington Beach, CA 92648,
-        # PALM912 - 912 Palm Avenue Huntington Beach, CA 92648,
-        # PALM914 - 914 Palm Avenue Huntington Beach, CA 92648,
-        # PALM 918 - 918 Palm Avenue Huntington Beach, CA 92648,
-        # PALM 922 - 922 Palm Avenue Huntington Beach, CA 92648,
-        # PALM916 - 916 Palm Avenue Huntington Beach, CA 92648,
-        # PALM920 - 920 Palm Avenue Huntington Beach, CA 92648,
-        # ocbeach8700 - 200,
-        # CLEVELAND369 - 71 - 369-371 N Cleveland Street Orange, CA 92866,
-        # Magnolia20332 - 20332 Magnolia Street Huntington Beach, CA 92646,
-        # VerdeMar9815 - 9815 Verde Mar Huntington Beach, CA 92646
+        PALM910 - 910 Palm Avenue Huntington Beach, CA 92648,
+        PALM912 - 912 Palm Avenue Huntington Beach, CA 92648,
+        PALM914 - 914 Palm Avenue Huntington Beach, CA 92648,
+        PALM 918 - 918 Palm Avenue Huntington Beach, CA 92648,
+        PALM 922 - 922 Palm Avenue Huntington Beach, CA 92648,
+        PALM916 - 916 Palm Avenue Huntington Beach, CA 92648,
+        PALM920 - 920 Palm Avenue Huntington Beach, CA 92648,
+        ocbeach8700 - 200,
+        CLEVELAND369 - 71 - 369-371 N Cleveland Street Orange, CA 92866,
+        Magnolia20332 - 20332 Magnolia Street Huntington Beach, CA 92646,
+        VerdeMar9815 - 9815 Verde Mar Huntington Beach, CA 92646
     ]
 }
 
