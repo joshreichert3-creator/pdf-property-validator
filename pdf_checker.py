@@ -20,17 +20,14 @@ CONFIG = {
     "REQUEST_TIMEOUT": 3600,
     "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx"),
     "MANAGEMENT_FEE_EXCLUDED_PROPERTIES": [
-        "PALM910",
-        "PALM912",
-        "PALM914",
-        "PALM 918",
-        "PALM 922",
-        "PALM916",
-        "PALM920",
-        "ocbeach8700",
-        "CLEVELAND369",
-        "Magnolia20332",
-        "VerdeMar9815",
+        # Add property codes here to skip management fee validation for specific properties.
+        # These must match the code that appears after "Properties:" in the PDF.
+        # Matching is case/whitespace insensitive (e.g. "PROP001", "prop001", "Prop 001" all match).
+        # All other checks (cash balances, prepaid rent, rent roll) still run normally.
+        #
+        # Example:
+        # "PROP001",
+        # "PROP002",
     ]
 }
 
@@ -336,17 +333,8 @@ def validate_management_fee(prop_code, management_fee_dollar_extracted, manageme
     has_failures = False
     failed_checks = []
 
-    # Look up this property in the fee table
+    # Look up this property in the fee table — no INFO row on success, only show on FAIL
     fee_entry, matched_key = find_property_fee(prop_code)
-    
-    if matched_key and matched_key != prop_code:
-        # Log that we used a fuzzy match
-        results.append({
-            "check": "Management Fee — Property Lookup",
-            "value": f"'{prop_code}' matched to '{matched_key}'",
-            "expected": "Exact or close match found",
-            "status": "INFO"
-        })
 
     if fee_entry is None:
         # Property not found in lookup file — FAIL
@@ -783,27 +771,27 @@ def parse_pdf(file_stream):
                     has_failures = True
                     failed_checks_for_summary.extend(fee_failed_checks)
 
-            # Prepaid Rent Liability
+            # Prepaid Rent - Balance Sheet
             if prepaid_rent_liability_value is not None:
                 status = "PASS" if prepaid_rent_liability_value >= 0 else "FAIL"
                 if status == "FAIL":
                     has_failures = True
-                    failed_checks_for_summary.append("Prepaid Rent Liability Non-Negative")
+                    failed_checks_for_summary.append("Prepaid Rent - Balance Sheet")
                 property_results.append({
-                    "check": "Prepaid Rent Liability Non-Negative",
+                    "check": "Prepaid Rent - Balance Sheet",
                     "value": f"${prepaid_rent_liability_value:,.2f}",
                     "expected": ">= $0",
                     "status": status
                 })
             else:
                 property_results.append({
-                    "check": "Prepaid Rent Liability Non-Negative",
+                    "check": "Prepaid Rent - Balance Sheet",
                     "value": "N/A (Not Found)",
                     "expected": ">= $0",
                     "status": "INFO"
                 })
 
-            # Sum of Negative Past Due vs Prepaid Rent Liability
+            # Prepaid Rent - Rent Roll
             expected_status_text = "N/A (Calculated Sum)"
             match_status_for_display = "INFO"
             display_value = "N/A (No negative values found)"
@@ -819,7 +807,7 @@ def parse_pdf(file_stream):
                     expected_status_text = f"No Match (Expected {prepaid_rent_liability_value:,.2f})"
                     match_status_for_display = "FAIL"
                     has_failures = True
-                    failed_checks_for_summary.append("Sum of Negative Past Due (Rent Roll)")
+                    failed_checks_for_summary.append("Prepaid Rent - Rent Roll")
             elif total_negative_past_due_sum == 0 and prepaid_rent_liability_value == 0:
                 expected_status_text = "Match (No Negative Past Due, No Prepaid Liability)"
                 match_status_for_display = "PASS"
@@ -828,7 +816,7 @@ def parse_pdf(file_stream):
                     expected_status_text = f"No Match (Expected {prepaid_rent_liability_value:,.2f}, no negative past due found)"
                     match_status_for_display = "FAIL"
                     has_failures = True
-                    failed_checks_for_summary.append("Sum of Negative Past Due (Rent Roll)")
+                    failed_checks_for_summary.append("Prepaid Rent - Rent Roll")
                 else:
                     expected_status_text = "N/A (No Negative Past Due to Compare)"
                     match_status_for_display = "INFO"
@@ -837,7 +825,7 @@ def parse_pdf(file_stream):
                 match_status_for_display = "INFO"
 
             property_results.append({
-                "check": "Sum of Negative Past Due (Rent Roll)",
+                "check": "Prepaid Rent - Rent Roll",
                 "value": display_value,
                 "expected": expected_status_text,
                 "status": match_status_for_display
