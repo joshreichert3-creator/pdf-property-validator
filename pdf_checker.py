@@ -21,16 +21,18 @@ CONFIG = {
     "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx"),
     "MANAGEMENT_FEE_EXCLUDED_PROPERTIES": [
         "PALM910",
-        "PALM912",
-        "PALM914",
-        "PALM 918",
-        "PALM 922",
-        "PALM916",
-        "PALM920",
-        "ocbeach8700",
-        "CLEVELAND369",
-        "Magnolia20332",
-        "VerdeMar9815",
+        "PALM912",
+        "PALM914",
+        "PALM 918",
+        "PALM 922",
+        "PALM916",
+        "PALM920",
+        "ocbeach8700",
+        "CLEVELAND369",
+        "Magnolia20332",
+        "VerdeMar9815",
+        "Lyons17951",
+        "SaintPaul6382",
     ]
 }
 
@@ -110,8 +112,18 @@ HTML_TEMPLATE = """
     .alert-warning { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
     h2 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 8px; margin: 30px 0 20px 0; font-size: 22px; }
     h3 { color: #007bff; margin: 25px 0 15px 0; font-size: 18px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    th, td { border: 1px solid #e0e0e0; padding: 12px; text-align: left; font-size: 14px; }
+    table {
+      width: 100%; table-layout: fixed; border-collapse: collapse;
+      margin-top: 15px; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    col.check    { width: 35%; }
+    col.value    { width: 25%; }
+    col.expected { width: 25%; }
+    col.status   { width: 15%; }
+    th, td {
+      border: 1px solid #e0e0e0; padding: 12px; text-align: left; font-size: 14px;
+      word-wrap: break-word; overflow-wrap: break-word;
+    }
     th { background-color: #f8f9fa; font-weight: 600; color: #555; }
     tr:hover { background-color: #f9f9f9; }
     .status-PASS { color: #28a745; font-weight: bold; }
@@ -228,12 +240,12 @@ HTML_TEMPLATE = """
 
         if (data.failing_summary && data.failing_summary.length > 0) {
           let summaryHtml = "<h2>⚠️ Properties with Failures</h2>";
-          summaryHtml += "<table class='summary-table'>";
-          summaryHtml += "<tr><th>Property</th><th>Failed Checks</th></tr>";
+          summaryHtml += "<table><colgroup><col class='check'><col class='value'><col class='expected'><col class='status'></colgroup>";
+          summaryHtml += "<tr><th>Property</th><th colspan='3'>Failed Checks</th></tr>";
           data.failing_summary.forEach(prop => {
             summaryHtml += `<tr>
               <td class='property-name'>${escapeHtml(prop.property)}</td>
-              <td class='failed-checks'>${escapeHtml(prop.failed_checks.join(", "))}</td>
+              <td class='failed-checks' colspan='3'>${escapeHtml(prop.failed_checks.join(", "))}</td>
             </tr>`;
           });
           summaryHtml += "</table>";
@@ -244,8 +256,10 @@ HTML_TEMPLATE = """
 
         let detailedHtml = "<h2>📋 Detailed Validation Results</h2>";
         data.detailed_checks.forEach(p => {
-          detailedHtml += `<h3>${escapeHtml(p.property)}</h3><table>
-          <tr><th>Check</th><th>Value</th><th>Expected</th><th>Status</th></tr>`;
+          detailedHtml += `<h3>${escapeHtml(p.property)}</h3>
+          <table>
+            <colgroup><col class="check"><col class="value"><col class="expected"><col class="status"></colgroup>
+            <tr><th>Check</th><th>Value</th><th>Expected</th><th>Status</th></tr>`;
           p.results.forEach(r => {
             const statusClass = `status-${r.status}`;
             detailedHtml += `<tr>
