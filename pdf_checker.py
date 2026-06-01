@@ -1,309 +1,515 @@
 import sys
 import os
+import re
+import uuid
+import socket
+import tempfile
+import threading
+import webbrowser
 
 import fitz  # PyMuPDF
-from flask import Flask, render_template_string, request, jsonify
-import tempfile
-import re
-import webbrowser
-import threading
-import socket
-import gc
+import pandas as pd
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max
+app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024  # 4GB (local; no network upload limit)
 
 CONFIG = {
     "MAX_PAGES": 10000,
     "REQUEST_TIMEOUT": 3600,
-    "PROPERTY_FEES_FILE": os.path.join(os.path.expanduser("~"), "Desktop", "property_fees.xlsx"),
     "MANAGEMENT_FEE_EXCLUDED_PROPERTIES": [
-        "PALM910",
-        "PALM912",
-        "PALM914",
-        "PALM 918",
-        "PALM 922",
-        "PALM916",
-        "PALM920",
-        "ocbeach8700",
-        "CLEVELAND369",
-        "Magnolia20332",
-        "VerdeMar9815",
-        "Lyons17951",
-        "SaintPaul6382",
-    ]
+        "PALM910", "PALM912", "PALM914", "PALM 918", "PALM 922",
+        "PALM916", "PALM920", "ocbeach8700", "CLEVELAND369",
+        "Magnolia20332", "VerdeMar9815", "Lyons17951", "SaintPaul6382",
+    ],
 }
 
 # ---------------------------------------------------------------------------
-# Load property fee lookup from xlsx at startup
+# Fee lookup: remembered between runs in the OS application-data folder.
 # ---------------------------------------------------------------------------
-PROPERTY_FEES = {}  # { "PROP001": {"fee_percent": 5.0, "min_dollar_charge": 150.0}, ... }
-FEES_FILE_ERROR = None
-
-def load_property_fees():
-    global PROPERTY_FEES, FEES_FILE_ERROR
-    path = CONFIG["PROPERTY_FEES_FILE"]
-    if not os.path.exists(path):
-        FEES_FILE_ERROR = f"property_fees.xlsx not found at: {path}"
-        print(f"WARNING: {FEES_FILE_ERROR}")
-        return
-
+def get_app_data_dir():
+    home = os.path.expanduser("~")
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local", "share"))
+    d = os.path.join(base, "PDFPropertyValidator")
     try:
-        import pandas as pd
-        df = pd.read_excel(path, sheet_name="Property Fees", dtype={"property_code": str})
-        required_cols = {"property_code", "fee_percent", "min_dollar_charge"}
-        if not required_cols.issubset(set(df.columns)):
-            FEES_FILE_ERROR = f"property_fees.xlsx is missing required columns: {required_cols - set(df.columns)}"
-            print(f"WARNING: {FEES_FILE_ERROR}")
-            return
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        d = tempfile.gettempdir()
+    return d
 
-        for _, row in df.iterrows():
-            code = str(row["property_code"]).strip()
-            if code:
-                PROPERTY_FEES[code] = {
-                    "fee_percent": float(row["fee_percent"]) if pd.notna(row["fee_percent"]) else None,
-                    "min_dollar_charge": float(row["min_dollar_charge"]) if pd.notna(row["min_dollar_charge"]) else None,
-                }
-        print(f"Loaded {len(PROPERTY_FEES)} properties from property_fees.xlsx")
-    except Exception as e:
-        FEES_FILE_ERROR = f"Failed to load property_fees.xlsx: {e}"
-        print(f"WARNING: {FEES_FILE_ERROR}")
+CACHED_FEES_PATH = os.path.join(get_app_data_dir(), "property_fees.xlsx")
 
-load_property_fees()
+PROPERTY_FEES = {}
+FEES_FILE_ERROR = "No fee file loaded yet \u2014 use \u201cUpdate fee file\u201d to add property_fees.xlsx."
+FEES_SOURCE_NAME = None
 
-# ---------------------------------------------------------------------------
-# HTML Template
-# ---------------------------------------------------------------------------
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+
+def _parse_fees_dataframe(df):
+    required_cols = {"property_code", "fee_percent", "min_dollar_charge"}
+    if not required_cols.issubset(set(df.columns)):
+        missing = required_cols - set(df.columns)
+        raise ValueError("Missing required column(s): " + ", ".join(sorted(missing)))
+    fees = {}
+    for _, row in df.iterrows():
+        code = str(row["property_code"]).strip()
+        if code and code.lower() != "nan":
+            fees[code] = {
+                "fee_percent": float(row["fee_percent"]) if pd.notna(row["fee_percent"]) else None,
+                "min_dollar_charge": float(row["min_dollar_charge"]) if pd.notna(row["min_dollar_charge"]) else None,
+            }
+    return fees
+
+
+def load_fees_from_path(path, source_name=None):
+    """Load the fee table from an .xlsx. Tries the 'Property Fees' sheet, then the first sheet."""
+    global PROPERTY_FEES, FEES_FILE_ERROR, FEES_SOURCE_NAME
+    if not os.path.exists(path):
+        FEES_FILE_ERROR = "No fee file loaded yet."
+        return False
+    try:
+        try:
+            df = pd.read_excel(path, sheet_name="Property Fees", dtype={"property_code": str})
+        except ValueError:
+            df = pd.read_excel(path, dtype={"property_code": str})  # fall back to first sheet
+        fees = _parse_fees_dataframe(df)
+        if not fees:
+            FEES_FILE_ERROR = "The fee file was read but contained no property rows."
+            return False
+        PROPERTY_FEES = fees
+        FEES_FILE_ERROR = None
+        FEES_SOURCE_NAME = source_name or os.path.basename(path)
+        print("Loaded %d properties from %s" % (len(PROPERTY_FEES), FEES_SOURCE_NAME))
+        return True
+    except Exception as ex:
+        FEES_FILE_ERROR = "Could not read the fee file: %s" % ex
+        print("WARNING:", FEES_FILE_ERROR)
+        return False
+
+
+# Load the remembered fee file on startup, if present.
+if os.path.exists(CACHED_FEES_PATH):
+    load_fees_from_path(CACHED_FEES_PATH, "property_fees.xlsx (saved)")
+
+
+def fees_payload():
+    return {
+        "loaded": FEES_FILE_ERROR is None and len(PROPERTY_FEES) > 0,
+        "count": len(PROPERTY_FEES),
+        "error": FEES_FILE_ERROR,
+        "source": FEES_SOURCE_NAME,
+    }
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>🏠 PDF Property Validator</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-      max-width: 900px; margin: 0 auto; padding: 30px 20px; background: #f5f5f5;
-    }
-    .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    h1 { color: #333; margin-bottom: 10px; font-size: 28px; }
-    .subtitle { color: #666; margin-bottom: 25px; font-size: 14px; }
-    .upload-section { background: #f9f9f9; padding: 20px; border-radius: 6px; margin-bottom: 30px; border: 2px dashed #ddd; }
-    input[type="file"] { margin-bottom: 15px; padding: 8px; font-size: 14px; }
-    button {
-      background: #007bff; color: white; border: none; padding: 12px 24px;
-      border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s;
-    }
-    button:hover:not(:disabled) { background: #0056b3; }
-    button:disabled { background: #ccc; cursor: not-allowed; }
-    .loader {
-      display: inline-block; width: 14px; height: 14px; border: 2px solid #f3f3f3;
-      border-top: 2px solid #007bff; border-radius: 50%; animation: spin 1s linear infinite;
-      margin-right: 8px; vertical-align: middle;
-    }
-    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    .alert { padding: 15px; border-radius: 4px; margin-bottom: 20px; }
-    .alert-error { background: #fee; color: #c33; border-left: 4px solid #c33; }
-    .alert-success { background: #efe; color: #3a3; border-left: 4px solid #3a3; }
-    .alert-warning { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
-    h2 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 8px; margin: 30px 0 20px 0; font-size: 22px; }
-    h3 { color: #007bff; margin: 25px 0 15px 0; font-size: 18px; }
-    table {
-      width: 100%; table-layout: fixed; border-collapse: collapse;
-      margin-top: 15px; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    col.check    { width: 35%; }
-    col.value    { width: 25%; }
-    col.expected { width: 25%; }
-    col.status   { width: 15%; }
-    th, td {
-      border: 1px solid #e0e0e0; padding: 12px; text-align: left; font-size: 14px;
-      word-wrap: break-word; overflow-wrap: break-word;
-    }
-    th { background-color: #f8f9fa; font-weight: 600; color: #555; }
-    tr:hover { background-color: #f9f9f9; }
-    .status-PASS { color: #28a745; font-weight: bold; }
-    .status-FAIL { color: #dc3545; font-weight: bold; }
-    .status-INFO { color: #6c757d; font-style: italic; }
-    .summary-table { margin-bottom: 30px; }
-    .summary-table .property-name { font-weight: 600; color: #333; }
-    .summary-table .failed-checks { color: #dc3545; }
-    hr { margin: 40px 0; border: none; border-top: 1px solid #e0e0e0; }
-    .hidden { display: none; }
-    .stats { display: flex; gap: 15px; margin-bottom: 20px; }
-    .stat-box { flex: 1; padding: 15px; border-radius: 6px; text-align: center; }
-    .stat-box.pass { background: #d4edda; border: 1px solid #c3e6cb; }
-    .stat-box.fail { background: #f8d7da; border: 1px solid #f5c6cb; }
-    .stat-number { font-size: 32px; font-weight: bold; margin-bottom: 5px; }
-    .stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
-    .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center; color: #999; font-size: 12px; }
-    .fees-status { font-size: 13px; margin-bottom: 15px; padding: 10px 14px; border-radius: 4px; }
-    .fees-ok { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
-    .fees-error { background: #fee; color: #c33; border-left: 4px solid #c33; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PDF Property Validator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F2ECDF; --surface:#FBF7EE; --surface-2:#F6F0E3;
+    --ink:#211C14; --ink-soft:#6F6553; --ink-faint:#9A9080;
+    --line:#E2D8C4; --line-strong:#D2C5AB;
+    --accent:#1E6A53; --accent-deep:#16513F; --accent-soft:#E0EDE6;
+    --pass:#1F7A4D; --fail:#B23A2E; --fail-soft:#F8E7E3;
+    --info:#9A9080; --warn:#9A6B12; --warn-soft:#F6EAD2;
+    --shadow:0 1px 2px rgba(33,28,20,.05),0 8px 28px -12px rgba(33,28,20,.18);
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:'Hanken Grotesk',-apple-system,BlinkMacSystemFont,sans-serif;
+    color:var(--ink); background:var(--paper);
+    background-image:
+      radial-gradient(120% 80% at 50% -10%, rgba(30,106,83,.06), transparent 60%),
+      radial-gradient(60% 50% at 100% 0%, rgba(154,107,18,.05), transparent 70%);
+    background-attachment:fixed;
+    line-height:1.5; padding:48px 20px 96px; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:940px;margin:0 auto}
+  .reveal{opacity:0;transform:translateY(10px);animation:rise .6s cubic-bezier(.2,.7,.2,1) forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* Masthead */
+  header{display:flex;align-items:center;gap:16px;margin-bottom:34px}
+  .mark{
+    width:46px;height:46px;border-radius:12px;flex:0 0 auto;
+    background:linear-gradient(150deg,var(--accent),var(--accent-deep));
+    color:#F2ECDF;display:grid;place-items:center;
+    font-family:'Fraunces',serif;font-weight:600;font-size:24px;
+    box-shadow:0 6px 18px -8px rgba(22,81,63,.7);
+  }
+  .title h1{
+    font-family:'Fraunces',serif;font-weight:600;font-size:30px;
+    letter-spacing:-.01em;line-height:1.05;
+  }
+  .title p{color:var(--ink-soft);font-size:14px;margin-top:3px}
+
+  /* Cards */
+  .card{
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);padding:22px 24px;margin-bottom:18px;
+  }
+  .card-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:4px}
+  .eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);font-weight:600}
+
+  /* Fee status pill */
+  .fee-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:9px;font-size:14px;font-weight:500;
+    padding:9px 14px;border-radius:999px;border:1px solid transparent}
+  .pill .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .pill.ok{background:var(--accent-soft);color:var(--accent-deep);border-color:#C6DFD4}
+  .pill.ok .dot{background:var(--accent)}
+  .pill.warn{background:var(--warn-soft);color:var(--warn);border-color:#E9D6A8}
+  .pill.warn .dot{background:var(--warn)}
+  .pill b{font-weight:700}
+
+  /* Buttons */
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:10px;font-weight:600;
+    transition:transform .08s ease,background .18s ease,box-shadow .18s ease}
+  button:active{transform:translateY(1px)}
+  .btn-primary{background:var(--accent);color:#F4EFE4;padding:14px 26px;font-size:15px;
+    box-shadow:0 8px 20px -10px rgba(22,81,63,.8)}
+  .btn-primary:hover:not(:disabled){background:var(--accent-deep)}
+  .btn-primary:disabled{background:var(--line-strong);color:#8d8470;cursor:not-allowed;box-shadow:none}
+  .btn-ghost{background:transparent;color:var(--accent-deep);padding:9px 15px;font-size:13.5px;
+    border:1px solid var(--line-strong)}
+  .btn-ghost:hover{background:var(--surface-2);border-color:var(--accent)}
+
+  /* Dropzone */
+  .drop{
+    margin-top:14px;border:1.5px dashed var(--line-strong);border-radius:12px;
+    background:var(--surface-2);padding:34px 22px;text-align:center;cursor:pointer;
+    transition:border-color .18s ease,background .18s ease,transform .18s ease;
+  }
+  .drop:hover{border-color:var(--accent);background:#F1EBDD}
+  .drop.drag{border-color:var(--accent);background:var(--accent-soft);transform:scale(1.005)}
+  .drop svg{width:34px;height:34px;color:var(--accent);margin-bottom:10px}
+  .drop .big{font-size:16px;font-weight:600}
+  .drop .small{font-size:13px;color:var(--ink-soft);margin-top:4px}
+  .drop .file{font-size:14px;color:var(--accent-deep);font-weight:600;margin-top:10px;
+    word-break:break-all;display:none}
+  .drop.has-file .file{display:block}
+  .actions{margin-top:18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+
+  /* Progress */
+  #progress{display:none}
+  .prog-top{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px}
+  .prog-pct{font-family:'Fraunces',serif;font-size:34px;font-weight:600;line-height:1}
+  .prog-msg{color:var(--ink-soft);font-size:14px}
+  .track{height:10px;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;overflow:hidden}
+  .fill{height:100%;width:0;border-radius:999px;
+    background:linear-gradient(90deg,var(--accent),var(--accent-deep));
+    transition:width .4s cubic-bezier(.3,.7,.3,1)}
+  .indet{position:relative}
+  .indet::after{content:"";position:absolute;inset:0;border-radius:999px;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);
+    animation:sheen 1.1s linear infinite}
+  @keyframes sheen{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+
+  /* Alerts */
+  .alert{padding:14px 16px;border-radius:10px;margin-bottom:18px;font-size:14.5px;display:none}
+  .alert.show{display:block}
+  .alert.err{background:var(--fail-soft);color:#8f2c22;border-left:4px solid var(--fail)}
+  .alert.good{background:var(--accent-soft);color:var(--accent-deep);border-left:4px solid var(--accent)}
+
+  /* Stats */
+  #results{display:none}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:8px}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px 22px;box-shadow:var(--shadow)}
+  .stat .n{font-family:'Fraunces',serif;font-size:46px;font-weight:600;line-height:1}
+  .stat .l{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);
+    font-weight:600;margin-top:8px}
+  .stat.pass{border-top:3px solid var(--pass)} .stat.pass .n{color:var(--pass)}
+  .stat.fail{border-top:3px solid var(--fail)} .stat.fail .n{color:var(--fail)}
+
+  .results-head{display:flex;align-items:center;justify-content:space-between;gap:14px;
+    margin:30px 0 14px}
+  h2.section{font-family:'Fraunces',serif;font-weight:600;font-size:22px;letter-spacing:-.01em}
+  h3.prop{font-family:'Fraunces',serif;font-weight:600;font-size:17px;color:var(--accent-deep);
+    margin:24px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;table-layout:fixed;
+    background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  col.c-check{width:38%} col.c-val{width:24%} col.c-exp{width:24%} col.c-st{width:14%}
+  th,td{padding:11px 14px;text-align:left;font-size:13.5px;border-bottom:1px solid var(--line);
+    word-break:break-word;vertical-align:top}
+  th{background:var(--surface-2);font-weight:700;color:var(--ink-soft);font-size:11px;
+    letter-spacing:.07em;text-transform:uppercase}
+  tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#F4EEE0}
+  td.num{font-family:'Spline Sans Mono',monospace;font-weight:500}
+  .tag{font-weight:700;font-size:12px;letter-spacing:.04em}
+  .tag.PASS{color:var(--pass)} .tag.FAIL{color:var(--fail)} .tag.INFO{color:var(--info);font-style:italic;font-weight:600}
+  .summary td.failed{color:var(--fail);font-weight:500}
+  .summary td.pname{font-weight:600}
+  .loader{display:inline-block;width:14px;height:14px;border:2px solid rgba(244,239,228,.4);
+    border-top-color:#F4EFE4;border-radius:50%;animation:spin .9s linear infinite;
+    margin-right:9px;vertical-align:-2px}
+
+  footer{text-align:center;color:var(--ink-faint);font-size:12px;margin-top:40px}
+  @media(max-width:560px){
+    .stats{grid-template-columns:1fr}
+    body{padding:30px 14px 70px}
+    .title h1{font-size:24px}
+  }
+</style>
 </head>
 <body>
-  <div class="container">
-    <h1>🏠 PDF Property Validator</h1>
-    <p class="subtitle">Upload your property statement PDF to validate cash balances, management fees, and rent roll data.</p>
+<div class="wrap">
 
-    <div id="feesStatus" class="fees-status {{ 'fees-ok' if not fees_error else 'fees-error' }}">
-      {% if fees_error %}
-        ⚠️ Fee lookup file error: {{ fees_error }}
-      {% else %}
-        ✅ Fee lookup loaded: {{ fees_count }} properties from property_fees.xlsx
-      {% endif %}
+  <header class="reveal">
+    <div class="mark">P</div>
+    <div class="title">
+      <h1>PDF Property Validator</h1>
+      <p>Validate cash balances, management fees, and rent-roll data from statement PDFs.</p>
     </div>
+  </header>
 
-    <div class="upload-section">
-      <input type="file" id="file" accept="application/pdf" />
-      <br>
-      <button id="checkBtn" onclick="checkPDF()">
-        <span id="btnText">Validate PDF</span>
-      </button>
+  <!-- Fee file -->
+  <section class="card reveal" style="animation-delay:.05s">
+    <div class="card-head"><span class="eyebrow">Fee lookup</span></div>
+    <div class="fee-row">
+      <div id="feePill" class="pill warn"><span class="dot"></span><span id="feeText">Checking fee file…</span></div>
+      <button class="btn-ghost" onclick="document.getElementById('feeInput').click()">Update fee file</button>
+      <input id="feeInput" type="file" accept=".xlsx,.xls" hidden />
     </div>
-    <div id="alert" class="hidden"></div>
-    <div id="stats" class="hidden"></div>
-    <hr class="hidden" id="divider">
+  </section>
+
+  <!-- Upload -->
+  <section class="card reveal" style="animation-delay:.1s">
+    <div class="card-head"><span class="eyebrow">Statement</span></div>
+    <div id="drop" class="drop">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/>
+      </svg>
+      <div class="big">Drop a statement PDF here</div>
+      <div class="small">or click to browse — no size limit, large multi-property files welcome</div>
+      <div class="file" id="fileName"></div>
+      <input id="pdfInput" type="file" accept="application/pdf" hidden />
+    </div>
+    <div class="actions">
+      <button id="goBtn" class="btn-primary" onclick="validate()"><span id="goText">Validate statement</span></button>
+    </div>
+  </section>
+
+  <!-- Progress -->
+  <section id="progress" class="card">
+    <div class="prog-top">
+      <div class="prog-pct"><span id="pctNum">0</span>%</div>
+      <div class="prog-msg" id="progMsg">Preparing…</div>
+    </div>
+    <div class="track"><div id="fill" class="fill"></div></div>
+  </section>
+
+  <div id="alert" class="alert"></div>
+
+  <!-- Results -->
+  <section id="results">
+    <div class="stats">
+      <div class="stat pass"><div class="n" id="nPass">0</div><div class="l">Properties passing</div></div>
+      <div class="stat fail"><div class="n" id="nFail">0</div><div class="l">Properties failing</div></div>
+    </div>
+    <div class="results-head">
+      <h2 class="section">Results</h2>
+      <button class="btn-ghost" onclick="exportCsv()">Export CSV</button>
+    </div>
     <div id="summary"></div>
-    <div id="results"></div>
-    <div class="footer">PDF Property Validator v1.1 | Close this browser window to exit the application</div>
-  </div>
-  <script>
-    async function checkPDF() {
-      const fileInput = document.getElementById("file");
-      const resultsDiv = document.getElementById("results");
-      const summaryDiv = document.getElementById("summary");
-      const alertDiv = document.getElementById("alert");
-      const statsDiv = document.getElementById("stats");
-      const divider = document.getElementById("divider");
-      const checkBtn = document.getElementById("checkBtn");
-      const btnText = document.getElementById("btnText");
+    <div id="detail"></div>
+  </section>
 
-      resultsDiv.innerHTML = ""; summaryDiv.innerHTML = "";
-      alertDiv.className = "hidden"; statsDiv.className = "hidden"; divider.className = "hidden";
+  <footer>PDF Property Validator v2.0 &middot; runs locally on your computer</footer>
+</div>
 
-      const file = fileInput.files[0];
-      if (!file) { showAlert("Please select a PDF file first.", "error"); return; }
+<script>
+  var lastData = null;
+  var pollTimer = null;
 
-      checkBtn.disabled = true;
-      btnText.innerHTML = '<span class="loader"></span>Processing PDF... This may take several minutes for large files';
+  function $(id){return document.getElementById(id)}
+  function esc(t){var d=document.createElement('div');d.textContent=(t==null?'':t);return d.innerHTML}
+  function isNum(v){return typeof v==='string' && /[0-9]/.test(v) && (v.indexOf('$')>=0||v.indexOf('%')>=0)}
 
-      const formData = new FormData();
-      formData.append("file", file);
+  function showAlert(msg,kind){
+    var a=$('alert'); a.textContent=msg;
+    a.className='alert show '+(kind==='good'?'good':'err');
+  }
+  function clearAlert(){var a=$('alert');a.className='alert'}
 
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 7200000);
-
-        const response = await fetch("/check_pdf", {
-          method: "POST", body: formData, signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Server error (${response.status}): ${errorText.substring(0, 100)}`);
-        }
-
-        const contentType = response.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-          const errorText = await response.text();
-          console.error("Non-JSON response:", errorText);
-          throw new Error("Server returned an error instead of results. The PDF may be too large or complex.");
-        }
-
-        const data = await response.json();
-        if (data.error) { showAlert(data.error, "error"); return; }
-
-        divider.className = "";
-
-        let totalProperties = data.detailed_checks.length;
-        let propertiesWithFailures = data.failing_summary ? data.failing_summary.length : 0;
-        let propertiesPassing = totalProperties - propertiesWithFailures;
-
-        statsDiv.className = "stats";
-        statsDiv.innerHTML = `
-          <div class="stat-box pass">
-            <div class="stat-number" style="color: #28a745;">${propertiesPassing}</div>
-            <div class="stat-label">Passing</div>
-          </div>
-          <div class="stat-box fail">
-            <div class="stat-number" style="color: #dc3545;">${propertiesWithFailures}</div>
-            <div class="stat-label">Failing</div>
-          </div>
-        `;
-
-        if (data.failing_summary && data.failing_summary.length > 0) {
-          let summaryHtml = "<h2>⚠️ Properties with Failures</h2>";
-          summaryHtml += "<table><colgroup><col class='check'><col class='value'><col class='expected'><col class='status'></colgroup>";
-          summaryHtml += "<tr><th>Property</th><th colspan='3'>Failed Checks</th></tr>";
-          data.failing_summary.forEach(prop => {
-            summaryHtml += `<tr>
-              <td class='property-name'>${escapeHtml(prop.property)}</td>
-              <td class='failed-checks' colspan='3'>${escapeHtml(prop.failed_checks.join(", "))}</td>
-            </tr>`;
-          });
-          summaryHtml += "</table>";
-          summaryDiv.innerHTML = summaryHtml;
-        } else {
-          showAlert("🎉 All properties passed all validation checks!", "success");
-        }
-
-        let detailedHtml = "<h2>📋 Detailed Validation Results</h2>";
-        data.detailed_checks.forEach(p => {
-          detailedHtml += `<h3>${escapeHtml(p.property)}</h3>
-          <table>
-            <colgroup><col class="check"><col class="value"><col class="expected"><col class="status"></colgroup>
-            <tr><th>Check</th><th>Value</th><th>Expected</th><th>Status</th></tr>`;
-          p.results.forEach(r => {
-            const statusClass = `status-${r.status}`;
-            detailedHtml += `<tr>
-              <td>${escapeHtml(r.check)}</td>
-              <td>${escapeHtml(r.value)}</td>
-              <td>${escapeHtml(r.expected)}</td>
-              <td class='${statusClass}'>${r.status}</td>
-            </tr>`;
-          });
-          detailedHtml += "</table>";
-        });
-        resultsDiv.innerHTML = detailedHtml;
-
-      } catch (error) {
-        if (error.name === 'AbortError') {
-          showAlert('Processing timed out. The PDF may be too large or complex. Try splitting it into smaller files.', "error");
-        } else {
-          showAlert(`Failed to process PDF: ${error.message}`, "error");
-        }
-      } finally {
-        checkBtn.disabled = false;
-        btnText.textContent = "Validate PDF";
-      }
+  // ---- Fee file ----
+  function renderFees(d){
+    var pill=$('feePill'), txt=$('feeText');
+    if(d.loaded){
+      pill.className='pill ok';
+      txt.innerHTML='Fee table loaded &middot; <b>'+d.count+'</b> properties'+(d.source?(' &middot; '+esc(d.source)):'');
+    }else{
+      pill.className='pill warn';
+      txt.textContent = d.error || 'No fee file loaded yet.';
     }
+  }
+  function refreshFees(){
+    fetch('/fees').then(function(r){return r.json()}).then(renderFees).catch(function(){});
+  }
+  $('feeInput').addEventListener('change',function(e){
+    var f=e.target.files[0]; if(!f) return;
+    var pill=$('feePill'), txt=$('feeText');
+    pill.className='pill warn'; txt.textContent='Loading '+f.name+'…';
+    var fd=new FormData(); fd.append('file',f);
+    fetch('/fees',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){
+      renderFees(d);
+      if(!d.loaded && d.error) showAlert(d.error,'err'); else clearAlert();
+    }).catch(function(err){ showAlert('Could not load fee file: '+err.message,'err'); });
+    e.target.value='';
+  });
 
-    function showAlert(message, type) {
-      const alertDiv = document.getElementById("alert");
-      alertDiv.className = type === "error" ? "alert alert-error" : "alert alert-success";
-      alertDiv.textContent = message;
-    }
+  // ---- Dropzone ----
+  var drop=$('drop'), pdfInput=$('pdfInput');
+  drop.addEventListener('click',function(){pdfInput.click()});
+  ['dragenter','dragover'].forEach(function(ev){
+    drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add('drag')});
+  });
+  ['dragleave','drop'].forEach(function(ev){
+    drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('drag')});
+  });
+  drop.addEventListener('drop',function(e){
+    var f=e.dataTransfer.files[0];
+    if(f){ pdfInput.files=e.dataTransfer.files; setFile(f); }
+  });
+  pdfInput.addEventListener('change',function(e){ if(e.target.files[0]) setFile(e.target.files[0]); });
+  function setFile(f){
+    drop.classList.add('has-file');
+    var mb=(f.size/1048576).toFixed(1);
+    $('fileName').textContent=f.name+'  ('+mb+' MB)';
+  }
 
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
-    }
+  // ---- Validate ----
+  function setBusy(b){
+    $('goBtn').disabled=b;
+    $('goText').innerHTML = b ? '<span class="loader"></span>Working…' : 'Validate statement';
+  }
+  function setProgress(pct,msg,indet){
+    $('progress').style.display='block';
+    $('pctNum').textContent=Math.round(pct);
+    $('fill').style.width=pct+'%';
+    $('fill').classList.toggle('indet',!!indet);
+    if(msg!=null) $('progMsg').textContent=msg;
+  }
 
-    document.getElementById('file').addEventListener('keypress', function(e) {
-      if (e.key === 'Enter') { checkPDF(); }
+  function validate(){
+    clearAlert();
+    if(pollTimer){clearInterval(pollTimer);pollTimer=null}
+    var f=pdfInput.files[0];
+    if(!f){ showAlert('Please choose a PDF statement first.','err'); return; }
+    $('results').style.display='none';
+    setBusy(true);
+    setProgress(2,'Uploading to local engine…',true);
+
+    var fd=new FormData(); fd.append('file',f);
+    fetch('/start',{method:'POST',body:fd}).then(function(r){
+      return r.json().then(function(d){return {ok:r.ok,d:d}});
+    }).then(function(res){
+      if(!res.ok || res.d.error){ throw new Error(res.d.error||'Could not start.'); }
+      poll(res.d.job_id);
+    }).catch(function(err){
+      setBusy(false); $('progress').style.display='none';
+      showAlert(err.message,'err');
     });
-  </script>
+  }
+
+  function poll(jobId){
+    pollTimer=setInterval(function(){
+      fetch('/progress/'+jobId).then(function(r){return r.json()}).then(function(p){
+        if(p.error){ stopPoll(); setBusy(false); $('progress').style.display='none'; showAlert(p.error,'err'); return; }
+        setProgress(p.percent||0,p.message,(p.percent||0)<1);
+        if(p.status==='done'){
+          stopPoll();
+          fetch('/result/'+jobId).then(function(r){return r.json()}).then(function(data){
+            setProgress(100,'Complete');
+            setTimeout(function(){$('progress').style.display='none'},500);
+            setBusy(false); render(data);
+          });
+        }else if(p.status==='error'){
+          stopPoll(); setBusy(false); $('progress').style.display='none';
+          showAlert(p.error||'Processing failed.','err');
+        }
+      }).catch(function(){ /* transient; keep polling */ });
+    },500);
+  }
+  function stopPoll(){ if(pollTimer){clearInterval(pollTimer);pollTimer=null} }
+
+  // ---- Render results ----
+  function render(data){
+    lastData=data;
+    var total=data.detailed_checks.length;
+    var failing=(data.failing_summary||[]).length;
+    $('nPass').textContent=total-failing;
+    $('nFail').textContent=failing;
+    $('results').style.display='block';
+
+    var sum=$('summary'); sum.innerHTML='';
+    if(failing>0){
+      var h='<h3 class="prop" style="color:var(--fail);border-color:var(--fail-soft)">Properties with failures</h3>';
+      h+='<table class="summary"><colgroup><col class="c-check"><col style="width:62%"></colgroup>';
+      h+='<thead><tr><th>Property</th><th>Failed checks</th></tr></thead><tbody>';
+      data.failing_summary.forEach(function(p){
+        h+='<tr><td class="pname">'+esc(p.property)+'</td><td class="failed">'+esc((p.failed_checks||[]).join(', '))+'</td></tr>';
+      });
+      h+='</tbody></table>';
+      sum.innerHTML=h;
+    }else{
+      showAlert('All properties passed every validation check.','good');
+    }
+
+    var det=$('detail'); var html='';
+    data.detailed_checks.forEach(function(p){
+      html+='<h3 class="prop">'+esc(p.property)+'</h3>';
+      html+='<table><colgroup><col class="c-check"><col class="c-val"><col class="c-exp"><col class="c-st"></colgroup>';
+      html+='<thead><tr><th>Check</th><th>Value</th><th>Expected</th><th>Status</th></tr></thead><tbody>';
+      p.results.forEach(function(r){
+        html+='<tr><td>'+esc(r.check)+'</td>'+
+              '<td class="'+(isNum(r.value)?'num':'')+'">'+esc(r.value)+'</td>'+
+              '<td class="'+(isNum(r.expected)?'num':'')+'">'+esc(r.expected)+'</td>'+
+              '<td><span class="tag '+r.status+'">'+r.status+'</span></td></tr>';
+      });
+      html+='</tbody></table>';
+    });
+    det.innerHTML=html;
+    $('results').scrollIntoView({behavior:'smooth',block:'start'});
+  }
+
+  // ---- CSV export ----
+  function exportCsv(){
+    if(!lastData) return;
+    var rows=[['Property','Check','Value','Expected','Status']];
+    lastData.detailed_checks.forEach(function(p){
+      p.results.forEach(function(r){ rows.push([p.property,r.check,r.value,r.expected,r.status]); });
+    });
+    var csv=rows.map(function(row){
+      return row.map(function(c){ return '"'+String(c==null?'':c).replace(/"/g,'""')+'"'; }).join(',');
+    }).join('\r\n');
+    var blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8;'});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a'); a.href=url; a.download='validation_results.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  refreshFees();
+</script>
 </body>
-</html>
-"""
+</html>"""
+
 
 # ---------------------------------------------------------------------------
 # Management fee validation using per-property lookup
@@ -429,8 +635,7 @@ def validate_management_fee(prop_code, management_fee_dollar_extracted, manageme
 # ---------------------------------------------------------------------------
 # PDF parsing
 # ---------------------------------------------------------------------------
-def parse_pdf(file_stream):
-    tmp_path = None
+def parse_pdf(pdf_path, progress_cb=None):
     doc = None
     final_property_checks = []
     failing_properties_summary = []
@@ -439,17 +644,16 @@ def parse_pdf(file_stream):
     excluded_codes = [normalize_code(c) for c in CONFIG.get("MANAGEMENT_FEE_EXCLUDED_PROPERTIES", [])]
 
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            file_stream.seek(0)
-            tmp.write(file_stream.read())
-            tmp.flush()
-            tmp_path = tmp.name
-
-        doc = fitz.open(tmp_path)
+        doc = fitz.open(pdf_path)
         property_page_map = {}
         current_property_key = None
 
-        all_pages_text_by_num = {p_num: doc.load_page(p_num).get_text("text") for p_num in range(doc.page_count)}
+        total_pages = doc.page_count
+        all_pages_text_by_num = {}
+        for p_num in range(total_pages):
+            all_pages_text_by_num[p_num] = doc.load_page(p_num).get_text("text")
+            if progress_cb and (p_num % 20 == 0 or p_num == total_pages - 1):
+                progress_cb("reading", p_num + 1, total_pages)
 
         for page_num, page_text in all_pages_text_by_num.items():
             if page_num >= CONFIG["MAX_PAGES"]:
@@ -490,7 +694,10 @@ def parse_pdf(file_stream):
                     property_page_map[("UNASSIGNED", "NO_HEADER")] = []
                 property_page_map[("UNASSIGNED", "NO_HEADER")].append(page_num)
 
-        for (prop_code, prop_address), relevant_page_nums_for_prop in property_page_map.items():
+        total_props = len(property_page_map)
+        for prop_index, ((prop_code, prop_address), relevant_page_nums_for_prop) in enumerate(property_page_map.items()):
+            if progress_cb:
+                progress_cb("validating", prop_index + 1, total_props)
 
             cash_in_bank_operating = None
             actual_ending_cash = None
@@ -862,10 +1069,64 @@ def parse_pdf(file_stream):
     finally:
         if doc:
             doc.close()
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
     return {"detailed_checks": final_property_checks, "failing_summary": failing_properties_summary}
+
+
+# ---------------------------------------------------------------------------
+# Background jobs (so the UI can show live progress on long files)
+# ---------------------------------------------------------------------------
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+
+def _run_job(job_id, pdf_path):
+    def cb(phase, current, total):
+        if total and total > 0:
+            if phase == "reading":
+                pct = int((current / total) * 35)
+                msg = "Reading page %s of %s\u2026" % ("{:,}".format(current), "{:,}".format(total))
+            else:
+                pct = 35 + int((current / total) * 63)
+                msg = "Validating property %d of %d\u2026" % (current, total)
+        else:
+            pct, msg = 0, "Starting\u2026"
+        with JOBS_LOCK:
+            j = JOBS.get(job_id)
+            if j:
+                j["percent"] = max(j["percent"], pct)
+                j["message"] = msg
+    try:
+        result = parse_pdf(pdf_path, progress_cb=cb)
+        with JOBS_LOCK:
+            j = JOBS.get(job_id)
+            if j:
+                if not result or not result.get("detailed_checks"):
+                    j["status"] = "error"
+                    j["error"] = "No properties were found in this PDF."
+                else:
+                    j["status"] = "done"; j["percent"] = 100
+                    j["message"] = "Complete"; j["result"] = result
+    except MemoryError:
+        _fail(job_id, "This PDF is too large to fit in memory. Try splitting it into smaller files.")
+    except Exception as ex:
+        m = str(ex)
+        if len(m) > 300:
+            m = m[:300] + "\u2026"
+        _fail(job_id, "Failed to process PDF: " + m)
+    finally:
+        try:
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+        except Exception:
+            pass
+
+
+def _fail(job_id, message):
+    with JOBS_LOCK:
+        j = JOBS.get(job_id)
+        if j:
+            j["status"] = "error"; j["error"] = message
 
 
 # ---------------------------------------------------------------------------
@@ -873,75 +1134,110 @@ def parse_pdf(file_stream):
 # ---------------------------------------------------------------------------
 @app.route('/')
 def index():
-    from flask import render_template_string
-    return render_template_string(
-        HTML_TEMPLATE,
-        fees_error=FEES_FILE_ERROR,
-        fees_count=len(PROPERTY_FEES)
-    )
+    return Response(HTML_TEMPLATE, mimetype='text/html')
 
-@app.route('/check_pdf', methods=['POST'])
-def check_pdf():
+
+@app.route('/fees', methods=['GET'])
+def fees_get():
+    return jsonify(fees_payload())
+
+
+@app.route('/fees', methods=['POST'])
+def fees_post():
     if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    if file and file.filename.endswith('.pdf'):
-        try:
-            results = parse_pdf(file.stream)
-            if not results:
-                return jsonify({'error': 'No properties found or parsed in the PDF.'}), 400
-            return jsonify(results)
-        except MemoryError:
-            return jsonify({'error': 'PDF file is too large to process. Try splitting it into smaller files.'}), 413
-        except TimeoutError:
-            return jsonify({'error': 'Processing timed out. The PDF is too complex. Try splitting it into smaller files.'}), 504
-        except Exception as e:
-            error_msg = str(e)
-            if len(error_msg) > 200:
-                error_msg = error_msg[:200] + "..."
-            return jsonify({'error': f'Failed to process PDF: {error_msg}'}), 500
-    else:
-        return jsonify({'error': 'Invalid file type. Please upload a PDF.'}), 400
+        return jsonify({"error": "No file part"}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({"error": "No file selected"}), 400
+    if not f.filename.lower().endswith(('.xlsx', '.xls')):
+        return jsonify({"error": "Please choose an Excel (.xlsx) file."}), 400
+    try:
+        f.save(CACHED_FEES_PATH)
+    except Exception as ex:
+        return jsonify({"error": "Could not save the fee file: %s" % ex}), 500
+    ok = load_fees_from_path(CACHED_FEES_PATH, f.filename)
+    return jsonify(fees_payload()), (200 if ok else 400)
+
+
+@app.route('/start', methods=['POST'])
+def start():
+    if FEES_FILE_ERROR is not None or len(PROPERTY_FEES) == 0:
+        return jsonify({"error": "Load a fee file before validating."}), 400
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({"error": "No file selected"}), 400
+    if not f.filename.lower().endswith('.pdf'):
+        return jsonify({"error": "Please choose a PDF file."}), 400
+
+    fd, pdf_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        f.save(pdf_path)
+    except Exception as ex:
+        return jsonify({"error": "Could not save the upload: %s" % ex}), 500
+
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        JOBS[job_id] = {"status": "running", "percent": 0, "message": "Starting\u2026",
+                        "result": None, "error": None}
+    threading.Thread(target=_run_job, args=(job_id, pdf_path), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route('/progress/<job_id>')
+def progress(job_id):
+    with JOBS_LOCK:
+        j = JOBS.get(job_id)
+        if not j:
+            return jsonify({"error": "Unknown job"}), 404
+        return jsonify({"status": j["status"], "percent": j["percent"],
+                        "message": j["message"], "error": j["error"]})
+
+
+@app.route('/result/<job_id>')
+def result(job_id):
+    with JOBS_LOCK:
+        j = JOBS.get(job_id)
+        if not j:
+            return jsonify({"error": "Unknown job"}), 404
+        if j["status"] != "done":
+            return jsonify({"error": "Result not ready"}), 409
+        res = j["result"]
+    return jsonify(res)
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Desktop launcher
 # ---------------------------------------------------------------------------
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        s.listen(1)
-        port = s.getsockname()[1]
-    return port
+        s.bind(('', 0)); s.listen(1)
+        return s.getsockname()[1]
+
 
 def open_browser(port):
     import time
-    time.sleep(1.5)
-    webbrowser.open(f'http://127.0.0.1:{port}')
+    time.sleep(1.2)
+    webbrowser.open("http://127.0.0.1:%d" % port)
+
 
 if __name__ == '__main__':
     try:
         sys.stdout.reconfigure(line_buffering=True)
-    except:
+    except Exception:
         pass
 
     port = find_free_port()
     threading.Thread(target=open_browser, args=(port,), daemon=True).start()
 
-    print(f"""
-╔══════════════════════════════════════════════════════════╗
-║         🏠 PDF Property Validator is Running            ║
-║  Your browser should open automatically.                ║
-║  If not, open: http://127.0.0.1:{port}                ║
-║  Press Ctrl+C to stop the application                   ║
-╚══════════════════════════════════════════════════════════╝
-    """)
+    print("\n  PDF Property Validator is running.")
+    print("  Your browser should open automatically.")
+    print("  If not, open: http://127.0.0.1:%d" % port)
+    print("  Close this window to quit.\n")
 
     import logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.WARNING)
-
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
     from werkzeug.serving import run_simple
     run_simple('127.0.0.1', port, app, use_reloader=False, use_debugger=False, threaded=True)
