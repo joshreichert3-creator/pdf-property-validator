@@ -1,51 +1,45 @@
 name: Build PDF Property Validator
+
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
+  workflow_dispatch:        # lets you trigger a build manually from the Actions tab
+
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: PDFPropertyValidator-Windows
+            binary: dist/PDFPropertyValidator.exe
+          - os: macos-latest
+            artifact: PDFPropertyValidator-macOS
+            binary: dist/PDFPropertyValidator
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flask PyMuPDF pyinstaller pandas openpyxl
-    
-    - name: Build executable
-      run: |
-        pyinstaller --onefile --name "PDFPropertyValidator" pdf_checker.py
-    
-    - name: Get version info
-      id: version
-      run: |
-        echo "date=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
-      shell: bash
-    
-    - name: Upload executable as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: PDFPropertyValidator-Windows-${{ steps.version.outputs.date }}
-        path: dist/PDFPropertyValidator.exe
-        retention-days: 90
-    
-    - name: Create Release (optional)
-      if: github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v${{ steps.version.outputs.date }}
-        name: PDF Property Validator ${{ steps.version.outputs.date }}
-        files: dist/PDFPropertyValidator.exe
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flask PyMuPDF pandas openpyxl pyinstaller
+
+      - name: Build executable
+        run: pyinstaller --onefile --name "PDFPropertyValidator" pdf_checker.py
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          retention-days: 90
