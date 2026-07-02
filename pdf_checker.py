@@ -706,7 +706,9 @@ def parse_pdf(pdf_path, progress_cb=None):
             prepaid_rent_liability_value = None
             total_negative_past_due_sum = 0.0
             security_deposit_bank_account = None   # Balance Sheet asset
-            security_deposit_liability = None      # Balance Sheet liability ("held in trust")
+            security_deposit_trust_liability = None    # Balance Sheet liability line specifically "held in trust" (compared to the bank account)
+            security_deposit_total_liability = 0.0      # sum of ALL "Security Deposit (...)" liability lines, e.g. "held in trust" + "held by owner" (compared to Rent Roll total)
+            security_deposit_liability_lines_found = 0  # how many such liability lines were found, so we can tell "not found" apart from a legitimate $0.00
             rent_roll_deposit_total = None         # Rent Roll grand-total Deposit column
 
             full_property_text_for_lines = "\n".join([all_pages_text_by_num[p_num] for p_num in relevant_page_nums_for_prop])
@@ -775,10 +777,24 @@ def parse_pdf(pdf_path, progress_cb=None):
                     break
 
             # --- Security Deposit (Balance Sheet: asset vs. liability) -------
-            # "Security Deposit Bank Account" (asset) and
-            # "Security Deposit ( held in trust account)" (liability) each sit
-            # on their own line with the dollar amount on the following line.
-            security_deposit_liability_pattern = re.compile(
+            # "Security Deposit Bank Account" (asset) sits on its own line with
+            # the dollar amount on the following line.
+            #
+            # The liability side can appear as a single line -
+            #   "Security Deposit ( held in trust account)"
+            # - or split across multiple lines when part of the deposit is
+            # held elsewhere, e.g.:
+            #   "Security Deposit (held by owner)"
+            #   "Security Deposit ( held in trust account)"
+            # Any line starting with "Security Deposit (" is treated as a
+            # liability line and summed into security_deposit_total_liability.
+            # The "held in trust" one is additionally tracked on its own,
+            # since that's the portion that should match the bank account
+            # (money the owner holds separately isn't in that bank account).
+            security_deposit_any_liability_pattern = re.compile(
+                r"^Security Deposit\s*\(", re.IGNORECASE
+            )
+            security_deposit_trust_pattern = re.compile(
                 r"^Security Deposit\s*\(\s*held in trust", re.IGNORECASE
             )
             for i, line in enumerate(lines_for_extraction):
@@ -792,12 +808,17 @@ def parse_pdf(pdf_path, progress_cb=None):
                             try: security_deposit_bank_account = float(match.group(1).replace(",", ""))
                             except ValueError: pass
 
-                if security_deposit_liability_pattern.match(stripped_line) and security_deposit_liability is None:
+                if security_deposit_any_liability_pattern.match(stripped_line):
                     if i + 1 < len(lines_for_extraction):
                         next_line = lines_for_extraction[i+1].strip()
                         match = standalone_number_pattern.match(next_line)
                         if match:
-                            try: security_deposit_liability = float(match.group(1).replace(",", ""))
+                            try:
+                                value = float(match.group(1).replace(",", ""))
+                                security_deposit_total_liability += value
+                                security_deposit_liability_lines_found += 1
+                                if security_deposit_trust_pattern.match(stripped_line) and security_deposit_trust_liability is None:
+                                    security_deposit_trust_liability = value
                             except ValueError: pass
 
             # --- Security Deposit (Rent Roll grand-total Deposit column) -----
@@ -1107,10 +1128,12 @@ def parse_pdf(pdf_path, progress_cb=None):
                 "status": match_status_for_display
             })
 
-            # Security Deposit - Balance Sheet (asset vs. liability match)
-            if security_deposit_bank_account is not None and security_deposit_liability is not None:
+            # Security Deposit - Balance Sheet (asset vs. "held in trust" liability match)
+            # Only the trust-held portion should match the bank account balance;
+            # any portion "held by owner" isn't in that bank account.
+            if security_deposit_bank_account is not None and security_deposit_trust_liability is not None:
                 epsilon = 0.001
-                sd_bs_match = abs(security_deposit_bank_account - security_deposit_liability) < epsilon
+                sd_bs_match = abs(security_deposit_bank_account - security_deposit_trust_liability) < epsilon
                 status = "PASS" if sd_bs_match else "FAIL"
                 if status == "FAIL":
                     has_failures = True
@@ -1118,7 +1141,7 @@ def parse_pdf(pdf_path, progress_cb=None):
                 property_results.append({
                     "check": "Security Deposit - Balance Sheet",
                     "value": f"${security_deposit_bank_account:,.2f} (bank)",
-                    "expected": f"${security_deposit_liability:,.2f} (liability)",
+                    "expected": f"${security_deposit_trust_liability:,.2f} (liability)",
                     "status": status
                 })
             else:
@@ -1129,10 +1152,16 @@ def parse_pdf(pdf_path, progress_cb=None):
                     "status": "INFO"
                 })
 
-            # Security Deposit - Rent Roll (liability vs. Rent Roll deposit total)
-            if security_deposit_liability is not None and rent_roll_deposit_total is not None:
+            # Security Deposit - Rent Roll (total liability vs. Rent Roll deposit total)
+            # Uses the SUM of every "Security Deposit (...)" liability line found
+            # (e.g. "held in trust" + "held by owner"), since the Rent Roll total
+            # reflects all deposits regardless of who's holding them.
+            security_deposit_total_liability_value = (
+                security_deposit_total_liability if security_deposit_liability_lines_found > 0 else None
+            )
+            if security_deposit_total_liability_value is not None and rent_roll_deposit_total is not None:
                 epsilon = 0.001
-                sd_rr_match = abs(security_deposit_liability - rent_roll_deposit_total) < epsilon
+                sd_rr_match = abs(security_deposit_total_liability_value - rent_roll_deposit_total) < epsilon
                 status = "PASS" if sd_rr_match else "FAIL"
                 if status == "FAIL":
                     has_failures = True
@@ -1140,7 +1169,7 @@ def parse_pdf(pdf_path, progress_cb=None):
                 property_results.append({
                     "check": "Security Deposit - Rent Roll",
                     "value": f"${rent_roll_deposit_total:,.2f} (rent roll)",
-                    "expected": f"${security_deposit_liability:,.2f} (liability)",
+                    "expected": f"${security_deposit_total_liability_value:,.2f} (liability)",
                     "status": status
                 })
             else:
