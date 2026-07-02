@@ -791,26 +791,68 @@ def parse_pdf(pdf_path, progress_cb=None):
             # The "held in trust" one is additionally tracked on its own,
             # since that's the portion that should match the bank account
             # (money the owner holds separately isn't in that bank account).
+            #
+            # IMPORTANT: the General Ledger section further down in the packet
+            # has its own account header lines for these same accounts (e.g.
+            # "1030 - Security Deposit Bank Account", "2010 - Security Deposit
+            # ( held in trust account)"). Those are normally excluded because
+            # they carry a numeric account-code prefix, but if a given report's
+            # text wrapping ever splits that prefix onto its own line, the bare
+            # label could accidentally match too. Since the account name would
+            # then appear a second time and get summed again, we scope this
+            # search strictly to the Balance Sheet's own Assets/Liabilities
+            # sections (bounded by their section headers/totals) so General
+            # Ledger content can never be reached at all, regardless of wrapping.
+            assets_section_start_idx = None
+            assets_section_end_idx = None
+            liabilities_section_start_idx = None
+            liabilities_section_end_idx = None
+            for i, line in enumerate(lines_for_extraction):
+                stripped_line = line.strip()
+                if assets_section_start_idx is None and stripped_line.upper() == "ASSETS":
+                    assets_section_start_idx = i
+                elif assets_section_start_idx is not None and assets_section_end_idx is None and stripped_line.upper() == "TOTAL ASSETS":
+                    assets_section_end_idx = i
+
+                if liabilities_section_start_idx is None and stripped_line.upper() == "LIABILITIES & CAPITAL":
+                    liabilities_section_start_idx = i
+                elif liabilities_section_start_idx is not None and liabilities_section_end_idx is None and stripped_line == "Total Liabilities":
+                    liabilities_section_end_idx = i
+
+            if assets_section_start_idx is not None and assets_section_end_idx is not None:
+                balance_sheet_assets_lines = lines_for_extraction[assets_section_start_idx:assets_section_end_idx]
+            else:
+                balance_sheet_assets_lines = lines_for_extraction  # fallback: section markers not found
+
+            if liabilities_section_start_idx is not None and liabilities_section_end_idx is not None:
+                balance_sheet_liabilities_lines = lines_for_extraction[liabilities_section_start_idx:liabilities_section_end_idx]
+            else:
+                balance_sheet_liabilities_lines = lines_for_extraction  # fallback: section markers not found
+
             security_deposit_any_liability_pattern = re.compile(
                 r"^Security Deposit\s*\(", re.IGNORECASE
             )
             security_deposit_trust_pattern = re.compile(
                 r"^Security Deposit\s*\(\s*held in trust", re.IGNORECASE
             )
-            for i, line in enumerate(lines_for_extraction):
+
+            for i, line in enumerate(balance_sheet_assets_lines):
                 stripped_line = line.strip()
 
                 if "Security Deposit Bank Account" == stripped_line and security_deposit_bank_account is None:
-                    if i + 1 < len(lines_for_extraction):
-                        next_line = lines_for_extraction[i+1].strip()
+                    if i + 1 < len(balance_sheet_assets_lines):
+                        next_line = balance_sheet_assets_lines[i+1].strip()
                         match = standalone_number_pattern.match(next_line)
                         if match:
                             try: security_deposit_bank_account = float(match.group(1).replace(",", ""))
                             except ValueError: pass
 
+            for i, line in enumerate(balance_sheet_liabilities_lines):
+                stripped_line = line.strip()
+
                 if security_deposit_any_liability_pattern.match(stripped_line):
-                    if i + 1 < len(lines_for_extraction):
-                        next_line = lines_for_extraction[i+1].strip()
+                    if i + 1 < len(balance_sheet_liabilities_lines):
+                        next_line = balance_sheet_liabilities_lines[i+1].strip()
                         match = standalone_number_pattern.match(next_line)
                         if match:
                             try:
