@@ -705,6 +705,9 @@ def parse_pdf(pdf_path, progress_cb=None):
             management_fee_percent_extracted = None
             prepaid_rent_liability_value = None
             total_negative_past_due_sum = 0.0
+            security_deposit_bank_account = None   # Balance Sheet asset
+            security_deposit_liability = None      # Balance Sheet liability ("held in trust")
+            rent_roll_deposit_total = None         # Rent Roll grand-total Deposit column
 
             full_property_text_for_lines = "\n".join([all_pages_text_by_num[p_num] for p_num in relevant_page_nums_for_prop])
             lines_for_extraction = full_property_text_for_lines.splitlines()
@@ -770,6 +773,55 @@ def parse_pdf(pdf_path, progress_cb=None):
                                     prepaid_rent_liability_value = value
                             except ValueError: pass
                     break
+
+            # --- Security Deposit (Balance Sheet: asset vs. liability) -------
+            # "Security Deposit Bank Account" (asset) and
+            # "Security Deposit ( held in trust account)" (liability) each sit
+            # on their own line with the dollar amount on the following line.
+            security_deposit_liability_pattern = re.compile(
+                r"^Security Deposit\s*\(\s*held in trust", re.IGNORECASE
+            )
+            for i, line in enumerate(lines_for_extraction):
+                stripped_line = line.strip()
+
+                if "Security Deposit Bank Account" == stripped_line and security_deposit_bank_account is None:
+                    if i + 1 < len(lines_for_extraction):
+                        next_line = lines_for_extraction[i+1].strip()
+                        match = standalone_number_pattern.match(next_line)
+                        if match:
+                            try: security_deposit_bank_account = float(match.group(1).replace(",", ""))
+                            except ValueError: pass
+
+                if security_deposit_liability_pattern.match(stripped_line) and security_deposit_liability is None:
+                    if i + 1 < len(lines_for_extraction):
+                        next_line = lines_for_extraction[i+1].strip()
+                        match = standalone_number_pattern.match(next_line)
+                        if match:
+                            try: security_deposit_liability = float(match.group(1).replace(",", ""))
+                            except ValueError: pass
+
+            # --- Security Deposit (Rent Roll grand-total Deposit column) -----
+            # The Rent Roll totals row reads, line by line:
+            #   Total / <n> / Units / <pct>% / Occupied / <Rent total> / <Deposit total> / <Past Due total>
+            # We scan for every "Occupied" marker and take the number two lines
+            # below it (the Deposit column); if a block is preceded by a
+            # standalone "Total" line within the previous few lines, that's the
+            # grand-total row, so we prefer and lock in that one.
+            for i, line in enumerate(lines_for_extraction):
+                if line.strip() == "Occupied":
+                    if i + 2 < len(lines_for_extraction):
+                        deposit_line = lines_for_extraction[i+2].strip()
+                        match = standalone_number_pattern.match(deposit_line)
+                        if match:
+                            try: rent_roll_deposit_total = float(match.group(1).replace(",", ""))
+                            except ValueError: pass
+
+                    preceded_by_total = any(
+                        lines_for_extraction[j].strip() == "Total"
+                        for j in range(max(0, i - 5), i)
+                    )
+                    if preceded_by_total and rent_roll_deposit_total is not None:
+                        break
 
             # Rent Roll Logic
             past_due_col_x0 = -1
@@ -1054,6 +1106,50 @@ def parse_pdf(pdf_path, progress_cb=None):
                 "expected": expected_status_text,
                 "status": match_status_for_display
             })
+
+            # Security Deposit - Balance Sheet (asset vs. liability match)
+            if security_deposit_bank_account is not None and security_deposit_liability is not None:
+                epsilon = 0.001
+                sd_bs_match = abs(security_deposit_bank_account - security_deposit_liability) < epsilon
+                status = "PASS" if sd_bs_match else "FAIL"
+                if status == "FAIL":
+                    has_failures = True
+                    failed_checks_for_summary.append("Security Deposit - Balance Sheet")
+                property_results.append({
+                    "check": "Security Deposit - Balance Sheet",
+                    "value": f"${security_deposit_bank_account:,.2f} (bank)",
+                    "expected": f"${security_deposit_liability:,.2f} (liability)",
+                    "status": status
+                })
+            else:
+                property_results.append({
+                    "check": "Security Deposit - Balance Sheet",
+                    "value": "N/A (Not Found)",
+                    "expected": "Bank Account = Liability",
+                    "status": "INFO"
+                })
+
+            # Security Deposit - Rent Roll (liability vs. Rent Roll deposit total)
+            if security_deposit_liability is not None and rent_roll_deposit_total is not None:
+                epsilon = 0.001
+                sd_rr_match = abs(security_deposit_liability - rent_roll_deposit_total) < epsilon
+                status = "PASS" if sd_rr_match else "FAIL"
+                if status == "FAIL":
+                    has_failures = True
+                    failed_checks_for_summary.append("Security Deposit - Rent Roll")
+                property_results.append({
+                    "check": "Security Deposit - Rent Roll",
+                    "value": f"${rent_roll_deposit_total:,.2f} (rent roll)",
+                    "expected": f"${security_deposit_liability:,.2f} (liability)",
+                    "status": status
+                })
+            else:
+                property_results.append({
+                    "check": "Security Deposit - Rent Roll",
+                    "value": "N/A (Not Found)",
+                    "expected": "Liability = Rent Roll Total Deposit",
+                    "status": "INFO"
+                })
 
             final_property_checks.append({
                 "property": f"{prop_code} - {prop_address}",
