@@ -821,32 +821,16 @@ def parse_pdf(pdf_path, progress_cb=None):
                                     security_deposit_trust_liability = value
                             except ValueError: pass
 
-            # --- Security Deposit (Rent Roll grand-total Deposit column) -----
-            # The Rent Roll totals row reads, line by line:
-            #   Total / <n> / Units / <pct>% / Occupied / <Rent total> / <Deposit total> / <Past Due total>
-            # We scan for every "Occupied" marker and take the number two lines
-            # below it (the Deposit column); if a block is preceded by a
-            # standalone "Total" line within the previous few lines, that's the
-            # grand-total row, so we prefer and lock in that one.
-            for i, line in enumerate(lines_for_extraction):
-                if line.strip() == "Occupied":
-                    if i + 2 < len(lines_for_extraction):
-                        deposit_line = lines_for_extraction[i+2].strip()
-                        match = standalone_number_pattern.match(deposit_line)
-                        if match:
-                            try: rent_roll_deposit_total = float(match.group(1).replace(",", ""))
-                            except ValueError: pass
-
-                    preceded_by_total = any(
-                        lines_for_extraction[j].strip() == "Total"
-                        for j in range(max(0, i - 5), i)
-                    )
-                    if preceded_by_total and rent_roll_deposit_total is not None:
-                        break
+            # NOTE: rent_roll_deposit_total is now extracted further below, using
+            # the same coordinate-based (word bounding box) table logic as the
+            # Past Due column, instead of guessing from plain-text line order.
+            # See "Rent Roll Logic" section.
 
             # Rent Roll Logic
             past_due_col_x0 = -1
             past_due_col_x1 = -1
+            deposit_col_x0 = -1
+            deposit_col_x1 = -1
             header_y_coord = -1
             number_pattern_for_past_due = re.compile(r"([-]?[\d,]+\.?\d{0,2})")
             expected_header_phrases = ["Unit", "Tenant", "Additional Tenants", "Status", "Rent", "Deposit", "Move-in", "Lease From", "Lease To", "Past Due"]
@@ -926,6 +910,7 @@ def parse_pdf(pdf_path, progress_cb=None):
                         found_all_phrases_in_sequence = True
                         current_search_text = full_line_text
                         past_due_word_bbox_in_header = None
+                        deposit_word_bbox_in_header = None
 
                         for i, phrase in enumerate(expected_header_phrases):
                             phrase_pattern = r'\b' + re.escape(phrase) + r'\b'
@@ -934,6 +919,14 @@ def parse_pdf(pdf_path, progress_cb=None):
                             if not match:
                                 found_all_phrases_in_sequence = False
                                 break
+
+                            if phrase == "Deposit":
+                                for word_bbox in current_line_words_for_reco:
+                                    if re.search(r'\bDeposit\b', word_bbox[4], re.IGNORECASE):
+                                        deposit_word_bbox_in_header = word_bbox
+                                        break
+                                # Non-blocking: Deposit detection failing must never
+                                # prevent the (already relied-upon) Past Due detection.
 
                             if phrase == "Past Due":
                                 _past_word_temp = None
@@ -969,6 +962,13 @@ def parse_pdf(pdf_path, progress_cb=None):
                                 past_due_col_x0 = -1
                                 past_due_col_x1 = -1
 
+                            if deposit_word_bbox_in_header:
+                                temp_deposit_x0 = deposit_word_bbox_in_header[0]
+                                temp_deposit_x1 = deposit_word_bbox_in_header[2]
+                                if temp_deposit_x0 != float('inf'):
+                                    deposit_col_x0 = temp_deposit_x0 - 5
+                                    deposit_col_x1 = temp_deposit_x1 + 5
+
                     if header_y_coord != -1 and past_due_col_x0 != -1 and past_due_col_x1 != -1:
                         if y_key == header_y_coord:
                             continue
@@ -1003,6 +1003,32 @@ def parse_pdf(pdf_path, progress_cb=None):
                                             total_negative_past_due_sum += numeric_value
                                     except ValueError:
                                         pass
+
+                            # Deposit column total: the Rent Roll typically has two
+                            # rows that both report the grand total (e.g. a
+                            # per-property subtotal row and a final "Total" row) -
+                            # they're redundant and always carry the same figure,
+                            # so we only capture the value from a summary/total row
+                            # and simply assign it (never sum), so seeing it twice
+                            # doesn't double-count it.
+                            if deposit_col_x0 != -1 and deposit_col_x1 != -1:
+                                is_summary_line_for_deposit = bool(re.search(r'\b(Total|Summary|Grand Total|Subtotal)\b', full_line_text, re.IGNORECASE)) or \
+                                                               bool(re.search(r'\d{1,3}(?:[,\.]\d{3})*(?:[,\.]\d+)?\s*%', full_line_text, re.IGNORECASE))
+                                if is_summary_line_for_deposit:
+                                    deposit_words_in_column = []
+                                    for word in current_line_words_for_reco:
+                                        x0, y0, x1, y1, text_content, *_ = word
+                                        if (x0 < deposit_col_x1 + 5 and x1 > deposit_col_x0 - 5):
+                                            deposit_words_in_column.append(text_content)
+                                    deposit_column_content = " ".join(deposit_words_in_column).strip()
+                                    if deposit_column_content:
+                                        deposit_match = number_pattern_for_past_due.search(deposit_column_content)
+                                        if deposit_match:
+                                            deposit_value_str = deposit_match.group(1).replace(",", "").replace("$", "").strip()
+                                            try:
+                                                rent_roll_deposit_total = float(deposit_value_str)
+                                            except ValueError:
+                                                pass
 
             # -------------------------------------------------------------------
             # Build results
