@@ -712,6 +712,7 @@ def parse_pdf(pdf_path, progress_cb=None):
             rent_roll_deposit_total = None         # Rent Roll grand-total Deposit column
             admin_fee_cash_flow_value = None       # Cash Flow "Admin Fee" line item - should never appear
             late_fee_income_cash_flow_value = None # Cash Flow "Late Fee Income" line item - should never be negative
+            appfolio_fee_cash_flow_value = None     # Cash Flow "Appfolio Application Fees" line item - should always be $0 when present
 
             full_property_text_for_lines = "\n".join([all_pages_text_by_num[p_num] for p_num in relevant_page_nums_for_prop])
             lines_for_extraction = full_property_text_for_lines.splitlines()
@@ -933,6 +934,34 @@ def parse_pdf(pdf_path, progress_cb=None):
                         try:
                             late_fee_income_cash_flow_value = float(match.group(1).replace(",", ""))
                         except ValueError: pass
+                    break
+
+            # Appfolio Application Fees: occasionally appears, and when it
+            # does its amount should always be $0.00. This is a longer label,
+            # so rather than hardcoding one wrap point, we try joining 1, 2,
+            # or 3 consecutive lines starting at each position and check
+            # whether the joined text matches the phrase - this handles it
+            # appearing on a single line or wrapping at any point, the same
+            # way other longer labels on this report sometimes wrap (e.g.
+            # "NOI - Net Operating" / "Income").
+            appfolio_phrase_pattern = re.compile(r"^Appfolio\s+Application\s+Fees\s*$", re.IGNORECASE)
+            for i in range(len(cash_flow_top_lines)):
+                matched_end_idx = None
+                for span in (1, 2, 3):
+                    if i + span > len(cash_flow_top_lines):
+                        continue
+                    joined = " ".join(l.strip() for l in cash_flow_top_lines[i:i+span])
+                    if appfolio_phrase_pattern.match(joined):
+                        matched_end_idx = i + span
+                        break
+                if matched_end_idx is not None:
+                    if matched_end_idx < len(cash_flow_top_lines):
+                        next_line = cash_flow_top_lines[matched_end_idx].strip()
+                        match = standalone_number_pattern.match(next_line)
+                        if match:
+                            try:
+                                appfolio_fee_cash_flow_value = float(match.group(1).replace(",", ""))
+                            except ValueError: pass
                     break
 
             # NOTE: rent_roll_deposit_total is now extracted further below, using
@@ -1369,6 +1398,34 @@ def parse_pdf(pdf_path, progress_cb=None):
                     "check": "Late Fee Income - Cash Flow",
                     "value": "Not Found",
                     "expected": ">= $0",
+                    "status": "INFO"
+                })
+
+            # Appfolio Application Fees - Cash Flow (should always be $0 when present)
+            if not cash_flow_top_section_found:
+                property_results.append({
+                    "check": "Appfolio Application Fees - Cash Flow",
+                    "value": "N/A (Section Not Found)",
+                    "expected": "$0.00",
+                    "status": "INFO"
+                })
+            elif appfolio_fee_cash_flow_value is not None:
+                epsilon = 0.005
+                status = "PASS" if abs(appfolio_fee_cash_flow_value) < epsilon else "FAIL"
+                if status == "FAIL":
+                    has_failures = True
+                    failed_checks_for_summary.append("Appfolio Application Fees - Cash Flow (non-zero)")
+                property_results.append({
+                    "check": "Appfolio Application Fees - Cash Flow",
+                    "value": f"${appfolio_fee_cash_flow_value:,.2f}",
+                    "expected": "$0.00",
+                    "status": status
+                })
+            else:
+                property_results.append({
+                    "check": "Appfolio Application Fees - Cash Flow",
+                    "value": "Not Found",
+                    "expected": "$0.00",
                     "status": "INFO"
                 })
 
