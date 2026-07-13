@@ -710,6 +710,8 @@ def parse_pdf(pdf_path, progress_cb=None):
             security_deposit_total_liability = 0.0      # sum of ALL "Security Deposit (...)" liability lines, e.g. "held in trust" + "held by owner" (compared to Rent Roll total)
             security_deposit_liability_lines_found = 0  # how many such liability lines were found, so we can tell "not found" apart from a legitimate $0.00
             rent_roll_deposit_total = None         # Rent Roll grand-total Deposit column
+            admin_fee_cash_flow_value = None       # Cash Flow "Admin Fee" line item - should never appear
+            late_fee_income_cash_flow_value = None # Cash Flow "Late Fee Income" line item - should never be negative
 
             full_property_text_for_lines = "\n".join([all_pages_text_by_num[p_num] for p_num in relevant_page_nums_for_prop])
             lines_for_extraction = full_property_text_for_lines.splitlines()
@@ -862,6 +864,76 @@ def parse_pdf(pdf_path, progress_cb=None):
                                 if security_deposit_trust_pattern.match(stripped_line) and security_deposit_trust_liability is None:
                                     security_deposit_trust_liability = value
                             except ValueError: pass
+
+            # --- Cash Flow (top section: Income & Expense line items) --------
+            # Occasionally an "Admin Fee" line item shows up in the Cash Flow
+            # statement's Expense breakdown - this should never happen and is
+            # a red flag. Separately, a "Late Fee Income" line item can show
+            # up in the Income breakdown - it should always be a positive
+            # (or zero) number; a negative value is a red flag.
+            #
+            # Scoped strictly to the top of the Cash Flow page (bounded by
+            # "Additional Cash GL Accounts:", a phrase unique to this page,
+            # down to the first "NOI" line that follows the Expense
+            # breakdown) so the General Ledger section - which always lists
+            # an "Admin Fee" account header regardless of whether it was
+            # actually charged this period - can never be reached.
+            cash_flow_top_start_idx = None
+            cash_flow_top_end_idx = None
+            for i, line in enumerate(lines_for_extraction):
+                stripped_line = line.strip()
+                if cash_flow_top_start_idx is None and "Additional Cash GL Accounts" in stripped_line:
+                    cash_flow_top_start_idx = i
+                elif cash_flow_top_start_idx is not None and cash_flow_top_end_idx is None and "NOI" in stripped_line:
+                    cash_flow_top_end_idx = i
+
+            if cash_flow_top_start_idx is not None and cash_flow_top_end_idx is not None:
+                cash_flow_top_lines = lines_for_extraction[cash_flow_top_start_idx:cash_flow_top_end_idx]
+                cash_flow_top_section_found = True
+            else:
+                cash_flow_top_lines = []
+                cash_flow_top_section_found = False
+
+            # Admin Fee: single-line label (mirrors similarly-short labels like
+            # "Management Fees", "Pest Control" which don't wrap on this report).
+            admin_fee_pattern = re.compile(r"^Admin\s*Fee\s*$", re.IGNORECASE)
+            for i, line in enumerate(cash_flow_top_lines):
+                stripped_line = line.strip()
+                if admin_fee_pattern.match(stripped_line):
+                    if i + 1 < len(cash_flow_top_lines):
+                        next_line = cash_flow_top_lines[i+1].strip()
+                        match = standalone_number_pattern.match(next_line)
+                        if match:
+                            try:
+                                admin_fee_cash_flow_value = float(match.group(1).replace(",", ""))
+                            except ValueError:
+                                admin_fee_cash_flow_value = 0.0  # label matched but amount unparsable; still flag its presence
+                    else:
+                        admin_fee_cash_flow_value = 0.0
+                    break
+
+            # Late Fee Income: allow both a single-line label and the 2-line
+            # wrap ("Late Fee" / "Income") seen with similarly-sized labels
+            # elsewhere on this report (e.g. "NOI - Net Operating" / "Income").
+            late_fee_income_single_pattern = re.compile(r"^Late\s*Fee\s*Income\s*$", re.IGNORECASE)
+            late_fee_wrap_first_pattern = re.compile(r"^Late\s*Fee\s*$", re.IGNORECASE)
+            for i, line in enumerate(cash_flow_top_lines):
+                stripped_line = line.strip()
+                value_line_idx = None
+
+                if late_fee_income_single_pattern.match(stripped_line):
+                    value_line_idx = i + 1
+                elif late_fee_wrap_first_pattern.match(stripped_line) and i + 1 < len(cash_flow_top_lines) and cash_flow_top_lines[i+1].strip().lower() == "income":
+                    value_line_idx = i + 2
+
+                if value_line_idx is not None and value_line_idx < len(cash_flow_top_lines):
+                    next_line = cash_flow_top_lines[value_line_idx].strip()
+                    match = standalone_number_pattern.match(next_line)
+                    if match:
+                        try:
+                            late_fee_income_cash_flow_value = float(match.group(1).replace(",", ""))
+                        except ValueError: pass
+                    break
 
             # NOTE: rent_roll_deposit_total is now extracted further below, using
             # the same coordinate-based (word bounding box) table logic as the
@@ -1245,6 +1317,58 @@ def parse_pdf(pdf_path, progress_cb=None):
                     "check": "Security Deposit - Rent Roll",
                     "value": "N/A (Not Found)",
                     "expected": "Liability = Rent Roll Total Deposit",
+                    "status": "INFO"
+                })
+
+            # Admin Fee - Cash Flow (should never appear; red flag if present)
+            if not cash_flow_top_section_found:
+                property_results.append({
+                    "check": "Admin Fee - Cash Flow",
+                    "value": "N/A (Section Not Found)",
+                    "expected": "Should Not Appear",
+                    "status": "INFO"
+                })
+            elif admin_fee_cash_flow_value is not None:
+                has_failures = True
+                failed_checks_for_summary.append("Admin Fee - Cash Flow (present - red flag)")
+                property_results.append({
+                    "check": "Admin Fee - Cash Flow",
+                    "value": f"${admin_fee_cash_flow_value:,.2f} (found)",
+                    "expected": "Should Not Appear",
+                    "status": "FAIL"
+                })
+            else:
+                property_results.append({
+                    "check": "Admin Fee - Cash Flow",
+                    "value": "Not Found",
+                    "expected": "Should Not Appear",
+                    "status": "PASS"
+                })
+
+            # Late Fee Income - Cash Flow (should never be negative)
+            if not cash_flow_top_section_found:
+                property_results.append({
+                    "check": "Late Fee Income - Cash Flow",
+                    "value": "N/A (Section Not Found)",
+                    "expected": ">= $0",
+                    "status": "INFO"
+                })
+            elif late_fee_income_cash_flow_value is not None:
+                status = "PASS" if late_fee_income_cash_flow_value >= 0 else "FAIL"
+                if status == "FAIL":
+                    has_failures = True
+                    failed_checks_for_summary.append("Late Fee Income - Cash Flow (negative)")
+                property_results.append({
+                    "check": "Late Fee Income - Cash Flow",
+                    "value": f"${late_fee_income_cash_flow_value:,.2f}",
+                    "expected": ">= $0",
+                    "status": status
+                })
+            else:
+                property_results.append({
+                    "check": "Late Fee Income - Cash Flow",
+                    "value": "Not Found",
+                    "expected": ">= $0",
                     "status": "INFO"
                 })
 
