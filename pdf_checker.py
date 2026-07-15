@@ -1006,10 +1006,52 @@ def parse_pdf(pdf_path, progress_cb=None):
                     break
 
             if rent_roll_page_num != -1:
-                all_property_words = doc.load_page(rent_roll_page_num).get_text("words")
+                # The Rent Roll table can spill onto one or more additional
+                # pages when a property has many units - the "Rent Roll"
+                # title and column headers only appear on the first such
+                # page. Gather words from that page AND every immediately
+                # following page that is ALSO a genuine Rent Roll page.
+                #
+                # We can't just stop at other known section titles (Balance
+                # Sheet/Cash Flow/General Ledger) - these owner packets often
+                # have attached bills/invoices (water bills, vendor invoices,
+                # etc.) tacked on after the Rent Roll, and those don't match
+                # any of those titles either, so that check let them slip
+                # through and get misread as table rows. Instead we require
+                # POSITIVE confirmation: each continuation page must itself
+                # mention "Rent Roll" (its own report footer/header), which
+                # attachments won't. The first page that doesn't ends the run.
+                rent_roll_mention_pattern = re.compile(r"\bRent\s*Roll\b", re.IGNORECASE)
 
-                if rent_roll_title_y != -1:
-                    all_property_words = [word for word in all_property_words if word[1] > rent_roll_title_y + 30]
+                rent_roll_page_nums_in_order = [rent_roll_page_num]
+                for p_num in relevant_page_nums_for_prop:
+                    if p_num <= rent_roll_page_num:
+                        continue
+                    page_text_for_check = all_pages_text_by_num.get(p_num, "")
+                    if rent_roll_mention_pattern.search(page_text_for_check):
+                        rent_roll_page_nums_in_order.append(p_num)
+                    else:
+                        break
+
+                all_property_words = []
+                page_y_offset = 0
+                for seq_idx, p_num in enumerate(rent_roll_page_nums_in_order):
+                    page_for_words = doc.load_page(p_num)
+                    this_page_words = page_for_words.get_text("words")
+
+                    if seq_idx == 0 and rent_roll_title_y != -1:
+                        this_page_words = [w for w in this_page_words if w[1] > rent_roll_title_y + 30]
+
+                    if page_y_offset > 0:
+                        this_page_words = [
+                            (w[0], w[1] + page_y_offset, w[2], w[3] + page_y_offset) + tuple(w[4:])
+                            for w in this_page_words
+                        ]
+
+                    all_property_words.extend(this_page_words)
+                    # Generous gap ensures no page's rows can ever be close
+                    # enough in y to be grouped with the next page's rows.
+                    page_y_offset += page_for_words.rect.height + 1000
 
                 all_property_words.sort(key=lambda w: (w[1], w[0]))
 
