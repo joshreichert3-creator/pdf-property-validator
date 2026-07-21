@@ -976,7 +976,18 @@ def parse_pdf(pdf_path, progress_cb=None):
             deposit_col_x1 = -1
             header_y_coord = -1
             number_pattern_for_past_due = re.compile(r"([-]?[\d,]+\.?\d{0,2})")
-            expected_header_phrases = ["Unit", "Tenant", "Additional Tenants", "Status", "Rent", "Deposit", "Move-in", "Lease From", "Lease To", "Past Due"]
+            # Standard layout: Unit / Tenant / Additional Tenants / Status / Rent /
+            # Deposit / Move-in / Lease From / Lease To / Past Due
+            expected_header_phrases_standard = ["Unit", "Tenant", "Additional Tenants", "Status", "Rent", "Deposit", "Move-in", "Lease From", "Lease To", "Past Due"]
+            # "Rent Roll (Itemized)-CAM" layout used on some properties instead
+            # of the standard Rent Roll: Unit / Status / Tenant / Rent/Lease
+            # Income / Common Area Maintenance Income / Total / Past Due - note
+            # there is NO Deposit column on this variant at all, so Security
+            # Deposit - Rent Roll simply won't have data to compare against for
+            # these properties (that's expected and shows as "Not Found", not a
+            # bug), while Past Due is still present and still gets read.
+            expected_header_phrases_itemized_cam = ["Unit", "Status", "Tenant", "Past Due"]
+            header_phrase_variants = [expected_header_phrases_standard, expected_header_phrases_itemized_cam]
 
             rent_roll_page_num = -1
             rent_roll_title_y = -1
@@ -1092,47 +1103,51 @@ def parse_pdf(pdf_path, progress_cb=None):
                     full_line_text = " ".join([w[4] for w in current_line_words_for_reco])
 
                     if header_y_coord == -1:
-                        found_all_phrases_in_sequence = True
-                        current_search_text = full_line_text
-                        past_due_word_bbox_in_header = None
-                        deposit_word_bbox_in_header = None
+                        for expected_header_phrases in header_phrase_variants:
+                            found_all_phrases_in_sequence = True
+                            current_search_text = full_line_text
+                            past_due_word_bbox_in_header = None
+                            deposit_word_bbox_in_header = None
 
-                        for i, phrase in enumerate(expected_header_phrases):
-                            phrase_pattern = r'\b' + re.escape(phrase) + r'\b'
-                            match = re.search(phrase_pattern, current_search_text, re.IGNORECASE)
+                            for i, phrase in enumerate(expected_header_phrases):
+                                phrase_pattern = r'\b' + re.escape(phrase) + r'\b'
+                                match = re.search(phrase_pattern, current_search_text, re.IGNORECASE)
 
-                            if not match:
-                                found_all_phrases_in_sequence = False
-                                break
-
-                            if phrase == "Deposit":
-                                for word_bbox in current_line_words_for_reco:
-                                    if re.search(r'\bDeposit\b', word_bbox[4], re.IGNORECASE):
-                                        deposit_word_bbox_in_header = word_bbox
-                                        break
-                                # Non-blocking: Deposit detection failing must never
-                                # prevent the (already relied-upon) Past Due detection.
-
-                            if phrase == "Past Due":
-                                _past_word_temp = None
-                                _due_word_temp = None
-                                for word_bbox in current_line_words_for_reco:
-                                    if re.search(r'\bPast\b', word_bbox[4], re.IGNORECASE):
-                                        _past_word_temp = word_bbox
-                                    elif re.search(r'\bDue\b', word_bbox[4], re.IGNORECASE):
-                                        _due_word_temp = word_bbox
-
-                                    if _past_word_temp and _due_word_temp and abs(_due_word_temp[1] - _past_word_temp[1]) < 5 and (_due_word_temp[0] - _past_word_temp[2]) < 10:
-                                        past_due_word_bbox_in_header = (_past_word_temp[0], _past_word_temp[1], _due_word_temp[2], _due_word_temp[3])
-                                        break
-                                    elif re.search(r'\bPast\s*Due\b', word_bbox[4], re.IGNORECASE):
-                                        past_due_word_bbox_in_header = word_bbox
-                                        break
-                                if not past_due_word_bbox_in_header:
+                                if not match:
                                     found_all_phrases_in_sequence = False
                                     break
 
-                            current_search_text = current_search_text[match.end():]
+                                if phrase == "Deposit":
+                                    for word_bbox in current_line_words_for_reco:
+                                        if re.search(r'\bDeposit\b', word_bbox[4], re.IGNORECASE):
+                                            deposit_word_bbox_in_header = word_bbox
+                                            break
+                                    # Non-blocking: Deposit detection failing must never
+                                    # prevent the (already relied-upon) Past Due detection.
+
+                                if phrase == "Past Due":
+                                    _past_word_temp = None
+                                    _due_word_temp = None
+                                    for word_bbox in current_line_words_for_reco:
+                                        if re.search(r'\bPast\b', word_bbox[4], re.IGNORECASE):
+                                            _past_word_temp = word_bbox
+                                        elif re.search(r'\bDue\b', word_bbox[4], re.IGNORECASE):
+                                            _due_word_temp = word_bbox
+
+                                        if _past_word_temp and _due_word_temp and abs(_due_word_temp[1] - _past_word_temp[1]) < 5 and (_due_word_temp[0] - _past_word_temp[2]) < 10:
+                                            past_due_word_bbox_in_header = (_past_word_temp[0], _past_word_temp[1], _due_word_temp[2], _due_word_temp[3])
+                                            break
+                                        elif re.search(r'\bPast\s*Due\b', word_bbox[4], re.IGNORECASE):
+                                            past_due_word_bbox_in_header = word_bbox
+                                            break
+                                    if not past_due_word_bbox_in_header:
+                                        found_all_phrases_in_sequence = False
+                                        break
+
+                                current_search_text = current_search_text[match.end():]
+
+                            if found_all_phrases_in_sequence and past_due_word_bbox_in_header:
+                                break  # this variant matched - stop trying further variants
 
                         if found_all_phrases_in_sequence and past_due_word_bbox_in_header:
                             header_y_coord = y_key
